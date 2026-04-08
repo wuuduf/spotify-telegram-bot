@@ -26,31 +26,42 @@ class Totp:
 
     @classmethod
     async def initialize(cls) -> "Totp":
-        # Try local cache file first (useful when git.gay is unreachable)
         local_cache = Path(__file__).parent.parent.parent / "totp_secrets.json"
         secrets = None
 
-        try:
-            import os
-            _proxy = (
-                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-                or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-            )
-            async with httpx.AsyncClient(proxy=_proxy) as client:
-                response = await client.get(TOTP_SECRETS_URL, timeout=10)
-            secrets = safe_json(response)
-            if response.status_code != 200 or not secrets:
+        # 默认优先使用本地缓存，避免网络不可达时每次启动都卡 10s 超时。
+        prefer_local = str(
+            os.environ.get("VOTIFY_TOTP_PREFER_LOCAL", "1")
+        ).strip().lower() not in {"0", "false", "no"}
+        if prefer_local and local_cache.exists():
+            try:
+                secrets = json.loads(local_cache.read_text())
+                logger.warning(f"Using cached TOTP secrets from {local_cache}")
+            except Exception:
                 secrets = None
-            else:
-                logger.debug(f"Received TOTP secrets from network: {secrets}")
-                # Save to local cache for future offline use
-                try:
-                    local_cache.write_text(json.dumps(secrets))
-                    logger.debug(f"Cached TOTP secrets to {local_cache}")
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.warning(f"Failed to fetch TOTP secrets from network: {e}")
+                logger.warning(f"Failed to parse cached TOTP secrets: {local_cache}")
+
+        if secrets is None:
+            try:
+                _proxy = (
+                    os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                    or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+                )
+                async with httpx.AsyncClient(proxy=_proxy) as client:
+                    response = await client.get(TOTP_SECRETS_URL, timeout=10)
+                secrets = safe_json(response)
+                if response.status_code != 200 or not secrets:
+                    secrets = None
+                else:
+                    logger.debug(f"Received TOTP secrets from network: {secrets}")
+                    # Save to local cache for future offline use
+                    try:
+                        local_cache.write_text(json.dumps(secrets))
+                        logger.debug(f"Cached TOTP secrets to {local_cache}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed to fetch TOTP secrets from network: {e}")
 
         if secrets is None:
             if local_cache.exists():
