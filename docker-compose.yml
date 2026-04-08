@@ -9,10 +9,15 @@ services:
     container_name: spotify-telegram-bot
     restart: unless-stopped
     environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TZ: ${TZ:-Asia/Shanghai}
+      # 直接改这里的 token 即可
+      TELEGRAM_BOT_TOKEN: "123456789:replace_me"
+      TZ: "Asia/Shanghai"
     volumes:
-      - ./docker/config:/config
+      # 写死路径：本地文件 -> 容器内路径
+      - ./docker/config/spotify_bot.config.toml:/config/spotify_bot.config.toml:ro
+      - ./docker/config/config.ini:/config/config.ini:ro
+      - ./docker/config/cookies.txt:/config/cookies.txt:ro
+      - ./docker/config/device.wvd:/config/device.wvd:ro
       - ./docker/data:/data
     command:
       [

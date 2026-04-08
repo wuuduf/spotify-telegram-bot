@@ -100,7 +100,6 @@ python -m votify.spotify_telegram_bot.main --config ./spotify_bot.config.toml
 
 ```bash
 mkdir -p docker/config docker/data
-cp docker/.env.example .env
 cp docker/config/config.ini.example docker/config/config.ini
 cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.config.toml
 ```
@@ -108,14 +107,14 @@ cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.confi
 2. Put your secrets into `docker/config/`:
 
 - `cookies.txt`
-- `device.wvd` (or your own `.wvd` filename, then update `docker/config/config.ini`)
+- `device.wvd`
 
-3. Edit `.env`:
+3. Edit `docker-compose.yml`:
 
-```bash
-TELEGRAM_BOT_TOKEN=123456789:replace_me
-TZ=Asia/Shanghai
-```
+- 把 `TELEGRAM_BOT_TOKEN` 改成你自己的 bot token
+- `cookies` / `.wvd` 路径已在 yml 里写死为：
+  - `./docker/config/cookies.txt -> /config/cookies.txt`
+  - `./docker/config/device.wvd -> /config/device.wvd`
 
 4. Start:
 
