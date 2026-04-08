@@ -20,8 +20,9 @@ search_limit = 8
 
 [runtime]
 python_bin = "./.venv/bin/python"
-download_root = "/tmp/spotify_telegram_bot_downloads"
-temp_root = "/tmp/spotify_telegram_bot_temp"
+download_root = "./spotify_telegram_bot_downloads"
+# 留空或填 /tmp 开头路径时，会自动改到 download_root/_tmp
+temp_root = "./spotify_telegram_bot_downloads/_tmp"
 cache_file = "./spotify-telegram-cache.json"
 telegram_send_global_interval_sec = 0.15
 telegram_send_chat_interval_sec = 0.8

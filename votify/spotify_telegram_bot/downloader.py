@@ -69,6 +69,19 @@ class VotifyRunner:
         self.download_timeout_sec = max(60, int(download_timeout_sec))
         self.download_retry_count = max(0, int(download_retry_count))
         self.download_retry_backoff_sec = max(0.0, float(download_retry_backoff_sec))
+        self.audio_download_mode = self._select_fast_audio_download_mode()
+
+    @staticmethod
+    def _select_fast_audio_download_mode() -> str:
+        """
+        优先选择更快的下载器：
+        aria2c > curl > ytdlp
+        """
+        if shutil.which("aria2c"):
+            return "aria2c"
+        if shutil.which("curl"):
+            return "curl"
+        return "ytdlp"
 
     async def download_url(
         self,
@@ -124,9 +137,12 @@ class VotifyRunner:
             "votify",
             "--config-path",
             self.votify_config_path,
-            # Bot 场景下不需要 CLI 的下载间隔节流（默认 10s/首），否则会明显拉长单曲与专辑耗时
+            # 采用当前环境里可用的更快下载器（aria2c > curl > ytdlp）
+            "--audio-download-mode",
+            self.audio_download_mode,
+            # 控制每首之间停顿为 2 秒（兼顾稳定性与速度）
             "--wait-interval",
-            "0",
+            "2",
             "--output",
             str(output_dir),
             "--temp",

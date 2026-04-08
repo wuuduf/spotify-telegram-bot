@@ -13,6 +13,8 @@ DEFAULT_VOTIFY_WORKDIR = str(PROJECT_ROOT)
 DEFAULT_COOKIES_PATH = str(PROJECT_ROOT / "cookies.txt")
 DEFAULT_CACHE_FILE = str(PROJECT_ROOT / "spotify-telegram-cache.json")
 DEFAULT_BOT_CONFIG_PATH = str(PROJECT_ROOT / "spotify_bot.config.toml")
+DEFAULT_DOWNLOAD_ROOT = str(PROJECT_ROOT / "spotify_telegram_bot_downloads")
+DEFAULT_TEMP_SUBDIR = "_tmp"
 
 
 @dataclass(slots=True)
@@ -31,8 +33,8 @@ class BotConfig:
 
     spotify_cookies_path: str = DEFAULT_COOKIES_PATH
 
-    download_root: str = "/tmp/spotify_telegram_bot_downloads"
-    temp_root: str = "/tmp/spotify_telegram_bot_temp"
+    download_root: str = DEFAULT_DOWNLOAD_ROOT
+    temp_root: str = str(Path(DEFAULT_DOWNLOAD_ROOT) / DEFAULT_TEMP_SUBDIR)
     cache_file: str = DEFAULT_CACHE_FILE
     keep_downloads: bool = False
     max_parallel_jobs: int = 1
@@ -81,6 +83,15 @@ class BotConfig:
                 except (TypeError, ValueError):
                     continue
 
+        download_root = str(
+            runtime_section.get("download_root", DEFAULT_DOWNLOAD_ROOT)
+        ).strip() or DEFAULT_DOWNLOAD_ROOT
+        temp_root_raw = str(runtime_section.get("temp_root", "")).strip()
+        temp_root = _resolve_temp_root(
+            download_root=download_root,
+            temp_root_raw=temp_root_raw,
+        )
+
         cfg = cls(
             bot_token=bot_token,
             telegram_api_base=str(
@@ -105,10 +116,8 @@ class BotConfig:
             votify_workdir=votify_workdir,
             python_bin=str(runtime_section.get("python_bin", sys.executable)),
             spotify_cookies_path=cookies_path,
-            download_root=str(
-                runtime_section.get("download_root", "/tmp/spotify_telegram_bot_downloads")
-            ),
-            temp_root=str(runtime_section.get("temp_root", "/tmp/spotify_telegram_bot_temp")),
+            download_root=download_root,
+            temp_root=temp_root,
             cache_file=str(
                 runtime_section.get("cache_file", DEFAULT_CACHE_FILE)
             ),
@@ -149,3 +158,17 @@ def _read_cookies_path_from_votify_config(votify_config_path: str) -> str:
         if cookies:
             return cookies
     return DEFAULT_COOKIES_PATH
+
+
+def _resolve_temp_root(download_root: str, temp_root_raw: str) -> str:
+    """
+    temp_root 统一放到 download_root 下，避免把临时大文件堆到系统 /tmp。
+    """
+    if not temp_root_raw or _is_system_tmp_path(temp_root_raw):
+        return str(Path(download_root) / DEFAULT_TEMP_SUBDIR)
+    return temp_root_raw
+
+
+def _is_system_tmp_path(path_str: str) -> bool:
+    p = Path(path_str).expanduser().as_posix()
+    return p == "/tmp" or p.startswith("/tmp/") or p == "/var/tmp" or p.startswith("/var/tmp/")
