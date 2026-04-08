@@ -51,11 +51,11 @@ class CliConfig:
         ),
     ]
     wait_interval: Annotated[
-        float,
+        int,
         option(
             "--wait-interval",
             help="Wait interval between downloads in seconds",
-            default=10.0,
+            default=10,
         ),
     ]
     read_urls_as_txt: Annotated[

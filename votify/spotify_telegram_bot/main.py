@@ -112,7 +112,7 @@ class SpotifyTelegramBotApp:
             download_retry_backoff_sec=config.download_retry_backoff_sec,
         )
         logger.info(
-            "votify runner: audio_download_mode=%s wait_interval=%.1fs",
+            "votify runner: audio_download_mode=%s wait_interval=%ss",
             self.runner.audio_download_mode,
             self.runner.wait_interval_sec,
         )
