@@ -418,3 +418,15 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         await self._wait_send_slot(chat_id)
         return await self._post_json("editMessageText", payload)
+
+    async def delete_message(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        await self._wait_send_slot(chat_id)
+        return await self._post_json("deleteMessage", payload)

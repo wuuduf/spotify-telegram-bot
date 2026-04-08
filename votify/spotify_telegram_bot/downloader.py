@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from time import monotonic
 from pathlib import Path
+from typing import Callable
 
 
 PRIMARY_MEDIA_EXTS = {
@@ -69,12 +70,16 @@ class VotifyRunner:
         self.download_retry_count = max(0, int(download_retry_count))
         self.download_retry_backoff_sec = max(0.0, float(download_retry_backoff_sec))
 
-    async def download_url(self, url: str) -> DownloadResult:
+    async def download_url(
+        self,
+        url: str,
+        on_log_line: Callable[[str], None] | None = None,
+    ) -> DownloadResult:
         max_attempts = 1 + self.download_retry_count
         last_error: VotifyRunError | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                return await self._download_url_once(url)
+                return await self._download_url_once(url, on_log_line=on_log_line)
             except VotifyRunError as exc:
                 last_error = exc
                 should_retry = attempt < max_attempts and self._is_retryable_error(exc)
@@ -99,7 +104,11 @@ class VotifyRunner:
             raise last_error
         raise RuntimeError("download_url reached an unexpected state")
 
-    async def _download_url_once(self, url: str) -> DownloadResult:
+    async def _download_url_once(
+        self,
+        url: str,
+        on_log_line: Callable[[str], None] | None = None,
+    ) -> DownloadResult:
         job_id = uuid.uuid4().hex
         job_root = self.download_root / job_id
         output_dir = job_root / "output"
@@ -148,6 +157,11 @@ class VotifyRunner:
                     s = line.decode("utf-8", errors="replace")
                     lf.write(s)
                     log_tail.append(s)
+                    if on_log_line is not None:
+                        try:
+                            on_log_line(s)
+                        except Exception:
+                            pass
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()

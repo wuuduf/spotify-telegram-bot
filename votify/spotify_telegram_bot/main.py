@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import io
 import logging
 import re
@@ -35,6 +36,7 @@ SPOTIFY_KIND_ALIASES = {
 }
 WORKER_LIMIT_MIN = 1
 WORKER_LIMIT_MAX = 4
+DOWNLOAD_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 HELP_TEXT = """\
 Spotify Telegram Bot（M2）
@@ -337,17 +339,11 @@ class SpotifyTelegramBotApp:
                 await self.telegram.answer_callback_query(cb_id, "该结果没有可用链接", show_alert=True)
                 return
             await self.telegram.answer_callback_query(cb_id, "已加入下载队列")
+            self._search_panels.pop(token, None)
             try:
-                await self.telegram.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=f"已选择：{item.name}\n{item.url}\n\n正在加入下载队列...",
-                    disable_web_page_preview=False,
-                    reply_markup=None,
-                )
+                await self.telegram.delete_message(chat_id=chat_id, message_id=message_id)
             except Exception:
                 pass
-            self._search_panels.pop(token, None)
             await self._enqueue_download(
                 chat_id,
                 item.url,
@@ -557,20 +553,33 @@ class SpotifyTelegramBotApp:
             )
             return
 
-        await self.telegram.send_message(
-            chat_id,
-            (
-                f"{'已强制刷新并加入队列' if force_refresh else '已加入队列'}"
-                f"（等待 {waiting}，运行 {running}）：\n{url}"
-            ),
-            reply_to_message_id=reply_to,
-            disable_web_page_preview=False,
-        )
+        status_message_id: int | None = None
+        try:
+            status_msg = await self.telegram.send_message(
+                chat_id,
+                (
+                    f"⏳ {'强制刷新后' if force_refresh else ''}排队中\n"
+                    f"等待: {waiting}  运行: {running}\n"
+                    f"{url}"
+                ),
+                reply_to_message_id=reply_to,
+                disable_web_page_preview=False,
+            )
+            raw_message_id = status_msg.get("message_id")
+            status_message_id = int(raw_message_id) if isinstance(raw_message_id, int) else None
+        except Exception:
+            status_message_id = None
+
         task = asyncio.create_task(
-            self._process_download(chat_id, url, cache_key, reply_to)
+            self._process_download(
+                chat_id,
+                url,
+                cache_key,
+                reply_to,
+                status_message_id=status_message_id,
+            )
         )
-        self._tasks.add(task)
-        task.add_done_callback(lambda t: self._tasks.discard(t))
+        self._track_task(task)
 
     async def _process_download(
         self,
@@ -578,11 +587,62 @@ class SpotifyTelegramBotApp:
         url: str,
         cache_key: str,
         reply_to: int | None,
+        status_message_id: int | None = None,
     ) -> None:
         result: DownloadResult | None = None
         run_error: VotifyRunError | None = None
         acquired = False
         started = False
+        download_progress: dict[str, float | None] = {"percent": None}
+        download_progress_stop = asyncio.Event()
+        download_progress_task: asyncio.Task[Any] | None = None
+        download_started_at = 0.0
+        last_status_text = ""
+        last_status_ts = 0.0
+
+        async def _set_status(text: str, force: bool = False) -> None:
+            nonlocal last_status_text, last_status_ts
+            if not status_message_id:
+                return
+            now = time.monotonic()
+            if not force:
+                if text == last_status_text:
+                    return
+                if now - last_status_ts < 0.8:
+                    return
+            try:
+                await self.telegram.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_message_id,
+                    text=text,
+                    disable_web_page_preview=False,
+                    reply_markup=None,
+                )
+                last_status_text = text
+                last_status_ts = now
+            except Exception:
+                pass
+
+        def _on_log_line(line: str) -> None:
+            percent = self._extract_download_percent(line)
+            if percent is not None:
+                download_progress["percent"] = percent
+
+        async def _download_status_loop() -> None:
+            spinner = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+            idx = 0
+            while not download_progress_stop.is_set():
+                elapsed = int(max(0, time.monotonic() - download_started_at))
+                percent = download_progress["percent"]
+                if percent is None:
+                    text = f"⬇️ 下载中 {spinner[idx % len(spinner)]}\n已用时 {elapsed}s"
+                else:
+                    text = f"⬇️ 下载中 {percent:.1f}%\n已用时 {elapsed}s"
+                await _set_status(text)
+                idx += 1
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(download_progress_stop.wait(), timeout=1.2)
+
         try:
             await self.sem.acquire()
             acquired = True
@@ -592,14 +652,25 @@ class SpotifyTelegramBotApp:
                 self.running_jobs += 1
                 started = True
 
+            await _set_status("⬇️ 下载中…", force=True)
             await self.telegram.send_chat_action(chat_id, "typing")
             try:
-                result = await self.runner.download_url(url)
+                download_started_at = time.monotonic()
+                if status_message_id:
+                    download_progress_task = asyncio.create_task(_download_status_loop())
+                result = await self.runner.download_url(url, on_log_line=_on_log_line)
             except VotifyRunError as exc:
                 run_error = exc
                 raise
+            finally:
+                download_progress_stop.set()
+                if download_progress_task is not None:
+                    with contextlib.suppress(Exception):
+                        await download_progress_task
 
             if not result.media_files:
+                await _set_status("✅ 下载完成，但未找到可上传媒体文件。", force=True)
+                self._schedule_message_delete(chat_id, status_message_id, delay_sec=8.0)
                 await self.telegram.send_message(
                     chat_id,
                     f"下载完成，但没有找到可上传媒体文件。\n目录：{result.output_dir}",
@@ -610,8 +681,13 @@ class SpotifyTelegramBotApp:
             sent = 0
             cache_entries: list[CachedFile] = []
             failed_files: list[str] = []
+            total_files = len(result.media_files)
             for media_path in result.media_files:
                 suffix = media_path.suffix.lower()
+                await _set_status(
+                    f"⬆️ 上传中 {sent + 1}/{total_files}\n{media_path.name}",
+                    force=True,
+                )
                 try:
                     await self.telegram.send_chat_action(chat_id, "upload_document")
                 except Exception as exc:
@@ -658,6 +734,10 @@ class SpotifyTelegramBotApp:
                     if cache_entry:
                         cache_entries.append(cache_entry)
                     sent += 1
+                    await _set_status(
+                        f"⬆️ 上传进度 {sent}/{total_files}",
+                        force=True,
+                    )
                 except TelegramApiError as exc:
                     logger.warning(
                         "Failed to upload as %s, fallback to document: %s (%s)",
@@ -680,6 +760,10 @@ class SpotifyTelegramBotApp:
                         if cache_entry:
                             cache_entries.append(cache_entry)
                         sent += 1
+                        await _set_status(
+                            f"⬆️ 上传进度 {sent}/{total_files}",
+                            force=True,
+                        )
                     except Exception as fallback_exc:
                         logger.warning(
                             "Failed to upload media after fallback: %s (%s)",
@@ -705,6 +789,11 @@ class SpotifyTelegramBotApp:
             if cache_entries:
                 self.cache.put(cache_key, cache_entries)
             if failed_files and sent > 0:
+                await _set_status(
+                    f"⚠️ 完成（成功 {sent}/{total_files}，失败 {len(failed_files)}）",
+                    force=True,
+                )
+                self._schedule_message_delete(chat_id, status_message_id, delay_sec=12.0)
                 preview = "\n".join(f"- {x}" for x in failed_files[:5])
                 more = ""
                 if len(failed_files) > 5:
@@ -714,6 +803,9 @@ class SpotifyTelegramBotApp:
                     f"⚠️ 部分文件发送失败（成功 {sent}，失败 {len(failed_files)}）:\n{preview}{more}",
                     reply_to_message_id=reply_to,
                 )
+            elif sent > 0:
+                await _set_status(f"✅ 完成（{sent}/{total_files}）", force=True)
+                self._schedule_message_delete(chat_id, status_message_id, delay_sec=8.0)
             if sent == 0 and failed_files:
                 raise RuntimeError(
                     "all media upload failed: "
@@ -725,6 +817,8 @@ class SpotifyTelegramBotApp:
             err = str(exc)
             if len(err) > 2000:
                 err = err[:2000] + "...(truncated)"
+            await _set_status(f"❌ 下载失败：{err}", force=True)
+            self._schedule_message_delete(chat_id, status_message_id, delay_sec=20.0)
             try:
                 await self.telegram.send_message(
                     chat_id,
@@ -1037,10 +1131,7 @@ class SpotifyTelegramBotApp:
         keyboard: list[list[dict[str, str]]] = []
 
         for idx, item in enumerate(page.items):
-            name = item.name.strip() or "(No title)"
-            text = f"{idx + 1}. {name}"
-            if len(text) > 60:
-                text = text[:57] + "..."
+            text = str(idx + 1)
             keyboard.append(
                 [
                     {
@@ -1081,6 +1172,45 @@ class SpotifyTelegramBotApp:
             f"- 搜索面板: {len(self._search_panels)}\n"
             f"- Worker 并发: {self.config.max_parallel_jobs}"
         )
+
+    def _track_task(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.add(task)
+        task.add_done_callback(lambda t: self._tasks.discard(t))
+
+    def _schedule_message_delete(
+        self,
+        chat_id: int,
+        message_id: int | None,
+        delay_sec: float = 8.0,
+    ) -> None:
+        if not message_id:
+            return
+
+        async def _delete_later() -> None:
+            await asyncio.sleep(max(0.1, delay_sec))
+            try:
+                await self.telegram.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+
+        self._track_task(asyncio.create_task(_delete_later()))
+
+    @staticmethod
+    def _extract_download_percent(line: str) -> float | None:
+        if not line:
+            return None
+        m = DOWNLOAD_PERCENT_RE.search(line)
+        if not m:
+            return None
+        try:
+            value = float(m.group(1))
+        except Exception:
+            return None
+        if value < 0:
+            return 0.0
+        if value > 100:
+            return 100.0
+        return value
 
     async def _try_send_cached(
         self,
