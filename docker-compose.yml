@@ -16,8 +16,9 @@ services:
       # 写死路径：本地文件 -> 容器内路径
       - ./docker/config/spotify_bot.config.toml:/config/spotify_bot.config.toml:ro
       - ./docker/config/config.ini:/config/config.ini:ro
-      - ./docker/config/cookies.txt:/config/cookies.txt:ro
-      - ./docker/config/device.wvd:/config/device.wvd:ro
+      # 用户只需把 cookies / wvd 放在仓库根目录
+      - ./cookies.txt:/config/cookies.txt:ro
+      - ./device.wvd:/config/device.wvd:ro
       - ./docker/data:/data
     command:
       [

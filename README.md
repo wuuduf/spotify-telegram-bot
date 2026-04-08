@@ -104,35 +104,36 @@ cp docker/config/config.ini.example docker/config/config.ini
 cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.config.toml
 ```
 
-2. Put your secrets into `docker/config/`:
+2. Put your secrets in repo root:
 
-- 必须放在这个目录（仓库根目录下）：
-  - `./docker/config/cookies.txt`
-  - `./docker/config/device.wvd`
+- 直接放在仓库根目录：
+  - `./cookies.txt`
+  - `./device.wvd`
 
-示例命令（把你自己的文件复制进去）：
+示例命令（把你自己的文件复制到根目录）：
 
 ```bash
-cp /你的路径/cookies.txt ./docker/config/cookies.txt
-cp /你的路径/device.wvd ./docker/config/device.wvd
+cp /你的路径/cookies.txt ./cookies.txt
+cp /你的路径/device.wvd ./device.wvd
 ```
 
-最终目录应类似：
+根目录应类似：
 
 ```text
-docker/config/
-├── config.ini
-├── spotify_bot.config.toml
+.
 ├── cookies.txt
-└── device.wvd
+├── device.wvd
+└── docker/config/
+    ├── config.ini
+    └── spotify_bot.config.toml
 ```
 
 3. Edit `docker-compose.yml`:
 
 - 把 `TELEGRAM_BOT_TOKEN` 改成你自己的 bot token
 - `cookies` / `.wvd` 路径已在 yml 里写死为：
-  - `./docker/config/cookies.txt -> /config/cookies.txt`
-  - `./docker/config/device.wvd -> /config/device.wvd`
+  - `./cookies.txt -> /config/cookies.txt`
+  - `./device.wvd -> /config/device.wvd`
 
 4. Start:
 
