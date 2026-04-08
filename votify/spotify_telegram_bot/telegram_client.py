@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +19,19 @@ class TelegramClient:
         token: str,
         api_base: str = "https://api.telegram.org",
         timeout_sec: int = 180,
+        send_global_interval_sec: float = 0.15,
+        send_chat_interval_sec: float = 0.8,
+        max_retry_attempts: int = 3,
     ) -> None:
         self.token = token
         self.api_base = api_base.rstrip("/")
         self.client = httpx.AsyncClient(timeout=timeout_sec)
+        self.send_global_interval_sec = max(0.0, float(send_global_interval_sec))
+        self.send_chat_interval_sec = max(0.0, float(send_chat_interval_sec))
+        self.max_retry_attempts = max(1, int(max_retry_attempts))
+        self._send_lock = asyncio.Lock()
+        self._last_global_send_at = 0.0
+        self._last_chat_send_at: dict[int, float] = {}
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -27,24 +39,101 @@ class TelegramClient:
     def _url(self, method: str) -> str:
         return f"{self.api_base}/bot{self.token}/{method}"
 
-    async def _post_json(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        resp = await self.client.post(self._url(method), json=payload)
+    async def _wait_send_slot(self, chat_id: int | None) -> None:
+        if self.send_global_interval_sec <= 0 and self.send_chat_interval_sec <= 0:
+            return
+        async with self._send_lock:
+            while True:
+                now = time.monotonic()
+                wait_sec = 0.0
+                if self.send_global_interval_sec > 0:
+                    wait_sec = max(
+                        wait_sec,
+                        self.send_global_interval_sec - (now - self._last_global_send_at),
+                    )
+                if chat_id is not None and self.send_chat_interval_sec > 0:
+                    last_chat = self._last_chat_send_at.get(int(chat_id), 0.0)
+                    wait_sec = max(
+                        wait_sec,
+                        self.send_chat_interval_sec - (now - last_chat),
+                    )
+                if wait_sec <= 0:
+                    stamp = time.monotonic()
+                    if self.send_global_interval_sec > 0:
+                        self._last_global_send_at = stamp
+                    if chat_id is not None and self.send_chat_interval_sec > 0:
+                        self._last_chat_send_at[int(chat_id)] = stamp
+                    if len(self._last_chat_send_at) > 4096:
+                        # 控制内存占用，粗略清理最老一半记录
+                        oldest = sorted(
+                            self._last_chat_send_at.items(),
+                            key=lambda kv: kv[1],
+                        )[:2048]
+                        for chat, _ in oldest:
+                            self._last_chat_send_at.pop(chat, None)
+                    return
+                await asyncio.sleep(wait_sec)
+
+    @staticmethod
+    def _extract_retry_after_seconds(data: dict[str, Any], fallback_text: str) -> float | None:
         try:
-            data = resp.json()
-        except Exception as exc:
-            text = resp.text[:500] if resp.text else ""
-            raise TelegramApiError(
-                f"{method} invalid json response ({resp.status_code}): {text}"
-            ) from exc
-        if resp.status_code != 200:
-            raise TelegramApiError(
-                f"{method} http {resp.status_code}: {data.get('description') or resp.text}"
-            )
-        if not data.get("ok"):
-            raise TelegramApiError(
-                f"{method} failed: {data.get('description') or resp.text}"
-            )
-        return data["result"]
+            params = data.get("parameters") or {}
+            retry_after = params.get("retry_after")
+            if retry_after is not None:
+                sec = float(retry_after)
+                if sec > 0:
+                    return min(sec, 60.0)
+        except Exception:
+            pass
+
+        text = str(fallback_text or "")
+        m = re.search(r"retry after\s+(\d+)", text, flags=re.IGNORECASE)
+        if m:
+            try:
+                sec = float(m.group(1))
+                if sec > 0:
+                    return min(sec, 60.0)
+            except Exception:
+                pass
+        return None
+
+    async def _post_json(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        last_error: TelegramApiError | None = None
+        for attempt in range(1, self.max_retry_attempts + 1):
+            try:
+                resp = await self.client.post(self._url(method), json=payload)
+            except httpx.HTTPError as exc:
+                if attempt >= self.max_retry_attempts:
+                    raise TelegramApiError(f"{method} request failed: {exc}") from exc
+                await asyncio.sleep(min(1.5 * attempt, 6.0))
+                continue
+
+            try:
+                data = resp.json()
+            except Exception as exc:
+                text = resp.text[:500] if resp.text else ""
+                raise TelegramApiError(
+                    f"{method} invalid json response ({resp.status_code}): {text}"
+                ) from exc
+
+            if resp.status_code == 200 and data.get("ok"):
+                return data["result"]
+
+            detail = str(data.get("description") or resp.text or "").strip()
+            if resp.status_code == 429 and attempt < self.max_retry_attempts:
+                retry_after = self._extract_retry_after_seconds(data, detail)
+                await asyncio.sleep(retry_after if retry_after is not None else min(1.8 * attempt, 8.0))
+                continue
+
+            if resp.status_code != 200:
+                last_error = TelegramApiError(f"{method} http {resp.status_code}: {detail}")
+            else:
+                last_error = TelegramApiError(f"{method} failed: {detail}")
+            break
+
+        if last_error:
+            raise last_error
+        raise TelegramApiError(f"{method} failed: unknown error")
 
     async def _post_form(
         self,
@@ -52,23 +141,42 @@ class TelegramClient:
         data: dict[str, Any],
         files: dict[str, Any],
     ) -> dict[str, Any]:
-        resp = await self.client.post(self._url(method), data=data, files=files)
-        try:
-            data_json = resp.json()
-        except Exception as exc:
-            text = resp.text[:500] if resp.text else ""
-            raise TelegramApiError(
-                f"{method} invalid json response ({resp.status_code}): {text}"
-            ) from exc
-        if resp.status_code != 200:
-            raise TelegramApiError(
-                f"{method} http {resp.status_code}: {data_json.get('description') or resp.text}"
-            )
-        if not data_json.get("ok"):
-            raise TelegramApiError(
-                f"{method} failed: {data_json.get('description') or resp.text}"
-            )
-        return data_json["result"]
+        last_error: TelegramApiError | None = None
+        for attempt in range(1, self.max_retry_attempts + 1):
+            try:
+                resp = await self.client.post(self._url(method), data=data, files=files)
+            except httpx.HTTPError as exc:
+                if attempt >= self.max_retry_attempts:
+                    raise TelegramApiError(f"{method} request failed: {exc}") from exc
+                await asyncio.sleep(min(1.5 * attempt, 6.0))
+                continue
+
+            try:
+                data_json = resp.json()
+            except Exception as exc:
+                text = resp.text[:500] if resp.text else ""
+                raise TelegramApiError(
+                    f"{method} invalid json response ({resp.status_code}): {text}"
+                ) from exc
+
+            if resp.status_code == 200 and data_json.get("ok"):
+                return data_json["result"]
+
+            detail = str(data_json.get("description") or resp.text or "").strip()
+            if resp.status_code == 429 and attempt < self.max_retry_attempts:
+                retry_after = self._extract_retry_after_seconds(data_json, detail)
+                await asyncio.sleep(retry_after if retry_after is not None else min(1.8 * attempt, 8.0))
+                continue
+
+            if resp.status_code != 200:
+                last_error = TelegramApiError(f"{method} http {resp.status_code}: {detail}")
+            else:
+                last_error = TelegramApiError(f"{method} failed: {detail}")
+            break
+
+        if last_error:
+            raise last_error
+        raise TelegramApiError(f"{method} failed: unknown error")
 
     async def get_me(self) -> dict[str, Any]:
         return await self._post_json("getMe", {})
@@ -106,9 +214,11 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        await self._wait_send_slot(chat_id)
         return await self._post_json("sendMessage", payload)
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        await self._wait_send_slot(chat_id)
         await self._post_json(
             "sendChatAction",
             {
@@ -140,6 +250,7 @@ class TelegramClient:
         if duration_seconds and duration_seconds > 0:
             payload["duration"] = int(duration_seconds)
 
+        await self._wait_send_slot(chat_id)
         audio_fp = audio_path.open("rb")
         thumb_fp = None
         try:
@@ -181,6 +292,7 @@ class TelegramClient:
             payload["performer"] = performer
         if duration_seconds and duration_seconds > 0:
             payload["duration"] = int(duration_seconds)
+        await self._wait_send_slot(chat_id)
         return await self._post_json("sendAudio", payload)
 
     async def send_document(
@@ -196,6 +308,7 @@ class TelegramClient:
         if caption:
             payload["caption"] = caption
 
+        await self._wait_send_slot(chat_id)
         with doc_path.open("rb") as fp:
             return await self._post_form(
                 "sendDocument",
@@ -218,6 +331,7 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if caption:
             payload["caption"] = caption
+        await self._wait_send_slot(chat_id)
         return await self._post_json("sendDocument", payload)
 
     async def send_video(
@@ -233,6 +347,7 @@ class TelegramClient:
         if caption:
             payload["caption"] = caption
 
+        await self._wait_send_slot(chat_id)
         with video_path.open("rb") as fp:
             return await self._post_form(
                 "sendVideo",
@@ -255,6 +370,7 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if caption:
             payload["caption"] = caption
+        await self._wait_send_slot(chat_id)
         return await self._post_json("sendVideo", payload)
 
     async def answer_callback_query(
@@ -287,4 +403,5 @@ class TelegramClient:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        await self._wait_send_slot(chat_id)
         return await self._post_json("editMessageText", payload)

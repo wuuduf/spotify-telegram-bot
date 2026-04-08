@@ -21,6 +21,8 @@ class BotConfig:
     telegram_api_base: str = "https://api.telegram.org"
     telegram_poll_timeout_sec: int = 30
     telegram_request_timeout_sec: int = 180
+    telegram_send_global_interval_sec: float = 0.15
+    telegram_send_chat_interval_sec: float = 0.8
     telegram_allowed_chat_ids: set[int] = field(default_factory=set)
 
     votify_config_path: str = DEFAULT_VOTIFY_CONFIG_PATH
@@ -89,6 +91,14 @@ class BotConfig:
             ),
             telegram_request_timeout_sec=max(
                 10, int(bot_section.get("request_timeout_sec", 180))
+            ),
+            telegram_send_global_interval_sec=max(
+                0.0,
+                float(runtime_section.get("telegram_send_global_interval_sec", 0.15)),
+            ),
+            telegram_send_chat_interval_sec=max(
+                0.0,
+                float(runtime_section.get("telegram_send_chat_interval_sec", 0.8)),
             ),
             telegram_allowed_chat_ids=allowed_chat_ids,
             votify_config_path=votify_config_path,

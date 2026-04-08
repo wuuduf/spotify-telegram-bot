@@ -21,26 +21,41 @@ from .telegram_client import TelegramApiError, TelegramClient
 logger = logging.getLogger(__name__)
 
 SPOTIFY_URL_RE = re.compile(
-    r"https://open\.spotify\.com/(track|album|playlist|artist|episode|show)/[A-Za-z0-9]{22}(?:\?[^\s]+)?"
+    r"https://open\.spotify\.com/(?:intl-[^/]+/)?(track|album|playlist|artist|episode|show)/[A-Za-z0-9]{22}(?:\?[^\s]+)?"
 )
+SPOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+SPOTIFY_KIND_ALIASES = {
+    "song": "track",
+    "track": "track",
+    "album": "album",
+    "artist": "artist",
+    "playlist": "playlist",
+    "episode": "episode",
+    "show": "show",
+}
+WORKER_LIMIT_MIN = 1
+WORKER_LIMIT_MAX = 4
 
 HELP_TEXT = """\
 Spotify Telegram Bot（M2）
 
 命令：
 /h 或 /help               显示帮助
-/u <spotify-url>          下载并上传
+/i                        显示 chat_id
+/i <type> <id>            按类型+ID下载（type: song|track|album|artist|playlist|episode|show）
+/u <spotify-url>          下载并上传（也支持 /u <type> <id>）
+/rf <spotify-url>         强制刷新（清缓存并重下；也支持 <type> <id>）
 /sg <关键词>              搜索歌曲
 /sa <关键词>              搜索专辑
 /sr <关键词>              搜索艺人
-/sp <关键词>              搜索歌单
-/s <type> <关键词>        统一搜索（type: song|album|artist|playlist）
+/s <type> <关键词>        统一搜索（type: song|album|artist）
+/st [worker1..worker4]    查看/设置 worker 并发
 /q                        查看队列状态
 
 说明：
 - 当前默认下载路线是 votify config.ini 中的配置（建议 web + aac-medium）。
 - 你也可以直接发 Spotify 链接，等价于 /u <url>。
-- 搜索结果支持按钮点选直接下载（含翻页）。
+- 搜索结果支持按钮点选直接下载（含翻页、关闭，且仅发起者可操作）。
 - 相同 URL 命中缓存时会直接复用 Telegram file_id 发送，不重复下载。
 """
 
@@ -54,6 +69,8 @@ class SearchPanelState:
     token: str
     chat_id: int
     message_id: int
+    owner_user_id: int | None
+    reply_to_message_id: int | None
     kind: str
     query: str
     offset: int
@@ -79,6 +96,8 @@ class SpotifyTelegramBotApp:
             token=config.bot_token,
             api_base=config.telegram_api_base,
             timeout_sec=config.telegram_request_timeout_sec,
+            send_global_interval_sec=config.telegram_send_global_interval_sec,
+            send_chat_interval_sec=config.telegram_send_chat_interval_sec,
         )
         self.runner = VotifyRunner(
             python_bin=config.python_bin,
@@ -94,6 +113,8 @@ class SpotifyTelegramBotApp:
         self.cache = TelegramFileCacheStore(config.cache_file)
         self.offset = 0
         self.sem = asyncio.Semaphore(config.max_parallel_jobs)
+        self._sem_resize_lock = asyncio.Lock()
+        self._sem_shrink_tasks: set[asyncio.Task[Any]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._stat_lock = asyncio.Lock()
         self.waiting_jobs = 0
@@ -193,9 +214,20 @@ class SpotifyTelegramBotApp:
         if not text:
             return
         message_id = msg.get("message_id")
+        from_user = msg.get("from") or {}
+        user_id_raw = from_user.get("id")
+        user_id = user_id_raw if isinstance(user_id_raw, int) else None
 
         if self._is_help_command(text):
             await self.telegram.send_message(chat_id, HELP_TEXT, reply_to_message_id=message_id)
+            return
+
+        if self._is_info_command(text):
+            await self._handle_info_command(chat_id, text, message_id)
+            return
+
+        if self._is_settings_command(text):
+            await self._handle_settings(chat_id, text, message_id)
             return
 
         if self._is_queue_command(text):
@@ -207,19 +239,39 @@ class SpotifyTelegramBotApp:
             return
 
         if self._is_url_command(text):
-            url = self._extract_url_from_command(text)
+            url = self._extract_url_from_command(text, default_kind=None)
             if not url:
                 await self.telegram.send_message(
                     chat_id,
-                    "Usage: /u <spotify-url>",
+                    "Usage: /u <spotify-url> 或 /u <type> <id>",
                     reply_to_message_id=message_id,
                 )
                 return
             await self._enqueue_download(chat_id, url, message_id)
             return
 
+        if self._is_refresh_command(text):
+            url = self._extract_url_from_command(text, default_kind=None)
+            if not url:
+                await self.telegram.send_message(
+                    chat_id,
+                    "Usage: /rf <spotify-url> 或 /rf <type> <id>",
+                    reply_to_message_id=message_id,
+                )
+                return
+            await self._enqueue_download(chat_id, url, message_id, force_refresh=True)
+            return
+
         if self._is_search_command(text):
-            await self._handle_search(chat_id, text, message_id)
+            await self._handle_search(chat_id, text, message_id, user_id)
+            return
+
+        if self._is_playlist_search_command(text):
+            await self.telegram.send_message(
+                chat_id,
+                "当前版本不支持 /sp（playlist 搜索）。请使用 /sg /sa /sr /s。",
+                reply_to_message_id=message_id,
+            )
             return
 
         if self._extract_spotify_url(text):
@@ -230,6 +282,9 @@ class SpotifyTelegramBotApp:
     async def _handle_callback_query(self, cb: dict[str, Any]) -> None:
         cb_id = str(cb.get("id") or "")
         data = str(cb.get("data") or "").strip()
+        from_user = cb.get("from") or {}
+        cb_user_id_raw = from_user.get("id")
+        cb_user_id = cb_user_id_raw if isinstance(cb_user_id_raw, int) else None
         message = cb.get("message") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
@@ -256,6 +311,13 @@ class SpotifyTelegramBotApp:
         state = self._search_panels.get(token)
         if not state or state.chat_id != chat_id or state.message_id != message_id:
             await self.telegram.answer_callback_query(cb_id, "该面板已过期，请重新搜索", show_alert=True)
+            return
+        if state.owner_user_id is not None and cb_user_id != state.owner_user_id:
+            await self.telegram.answer_callback_query(
+                cb_id,
+                "仅命令发起者可操作该面板",
+                show_alert=True,
+            )
             return
 
         if action == "pick":
@@ -286,7 +348,11 @@ class SpotifyTelegramBotApp:
             except Exception:
                 pass
             self._search_panels.pop(token, None)
-            await self._enqueue_download(chat_id, item.url, message_id)
+            await self._enqueue_download(
+                chat_id,
+                item.url,
+                state.reply_to_message_id or message_id,
+            )
             return
 
         if action == "page":
@@ -345,7 +411,7 @@ class SpotifyTelegramBotApp:
                 await self.telegram.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text="搜索面板已关闭。你可以再次发送 /sg /sa /sr /sp /s 进行搜索。",
+                    text="搜索面板已关闭。你可以再次发送 /sg /sa /sr /s 进行搜索。",
                     disable_web_page_preview=True,
                     reply_markup=None,
                 )
@@ -355,7 +421,13 @@ class SpotifyTelegramBotApp:
 
         await self.telegram.answer_callback_query(cb_id, "Unsupported action")
 
-    async def _handle_search(self, chat_id: int, text: str, reply_to: int | None) -> None:
+    async def _handle_search(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None,
+        owner_user_id: int | None,
+    ) -> None:
         cmd, args = self._parse_command(text)
         if cmd in {"sg", "search_song"}:
             kind = "song"
@@ -366,19 +438,24 @@ class SpotifyTelegramBotApp:
         elif cmd in {"sr", "search_artist"}:
             kind = "artist"
             query = args
-        elif cmd in {"sp", "search_playlist"}:
-            kind = "playlist"
-            query = args
         else:
             parts = args.split(maxsplit=1)
             if len(parts) != 2:
                 await self.telegram.send_message(
                     chat_id,
-                    "Usage: /s <song|album|artist|playlist> <keywords>",
+                    "Usage: /s <song|album|artist> <keywords>",
                     reply_to_message_id=reply_to,
                 )
                 return
             kind, query = parts[0], parts[1]
+            kind = kind.strip().lower()
+            if kind not in {"song", "album", "artist"}:
+                await self.telegram.send_message(
+                    chat_id,
+                    "搜索类型只支持：song | album | artist",
+                    reply_to_message_id=reply_to,
+                )
+                return
 
         if not query.strip():
             await self.telegram.send_message(
@@ -426,6 +503,8 @@ class SpotifyTelegramBotApp:
             token=token,
             chat_id=chat_id,
             message_id=int(sent_msg.get("message_id", 0)),
+            owner_user_id=owner_user_id,
+            reply_to_message_id=reply_to,
             kind=kind,
             query=query.strip(),
             offset=page.offset,
@@ -435,16 +514,25 @@ class SpotifyTelegramBotApp:
             created_at=time.time(),
         )
 
-    async def _enqueue_download(self, chat_id: int, url: str, reply_to: int | None) -> None:
+    async def _enqueue_download(
+        self,
+        chat_id: int,
+        url: str,
+        reply_to: int | None,
+        force_refresh: bool = False,
+    ) -> None:
         cache_key = self._normalize_spotify_url(url)
-        cached_sent = await self._try_send_cached(chat_id, cache_key, reply_to)
-        if cached_sent:
-            await self.telegram.send_message(
-                chat_id,
-                f"♻️ 命中缓存，已直接发送 {cached_sent} 个文件。",
-                reply_to_message_id=reply_to,
-            )
-            return
+        if force_refresh:
+            self.cache.delete(cache_key)
+        else:
+            cached_sent = await self._try_send_cached(chat_id, cache_key, reply_to)
+            if cached_sent:
+                await self.telegram.send_message(
+                    chat_id,
+                    f"♻️ 命中缓存，已直接发送 {cached_sent} 个文件。",
+                    reply_to_message_id=reply_to,
+                )
+                return
 
         reject_msg: str | None = None
         waiting = 0
@@ -471,7 +559,10 @@ class SpotifyTelegramBotApp:
 
         await self.telegram.send_message(
             chat_id,
-            f"已加入队列（等待 {waiting}，运行 {running}）：\n{url}",
+            (
+                f"{'已强制刷新并加入队列' if force_refresh else '已加入队列'}"
+                f"（等待 {waiting}，运行 {running}）：\n{url}"
+            ),
             reply_to_message_id=reply_to,
             disable_web_page_preview=False,
         )
@@ -636,14 +727,34 @@ class SpotifyTelegramBotApp:
         return cmd in {"h", "help", "start"}
 
     @staticmethod
+    def _is_info_command(text: str) -> bool:
+        cmd, _ = SpotifyTelegramBotApp._parse_command(text)
+        return cmd in {"i", "id"}
+
+    @staticmethod
+    def _is_settings_command(text: str) -> bool:
+        cmd, _ = SpotifyTelegramBotApp._parse_command(text)
+        return cmd in {"st", "settings"}
+
+    @staticmethod
     def _is_url_command(text: str) -> bool:
         cmd, _ = SpotifyTelegramBotApp._parse_command(text)
         return cmd in {"u", "url"}
 
     @staticmethod
+    def _is_refresh_command(text: str) -> bool:
+        cmd, _ = SpotifyTelegramBotApp._parse_command(text)
+        return cmd in {"rf", "refresh"}
+
+    @staticmethod
     def _is_search_command(text: str) -> bool:
         cmd, _ = SpotifyTelegramBotApp._parse_command(text)
-        return cmd in {"sg", "sa", "sr", "sp", "s", "search", "search_song", "search_album", "search_artist", "search_playlist"}
+        return cmd in {"sg", "sa", "sr", "s", "search", "search_song", "search_album", "search_artist"}
+
+    @staticmethod
+    def _is_playlist_search_command(text: str) -> bool:
+        cmd, _ = SpotifyTelegramBotApp._parse_command(text)
+        return cmd in {"sp", "search_playlist"}
 
     @staticmethod
     def _is_queue_command(text: str) -> bool:
@@ -664,20 +775,208 @@ class SpotifyTelegramBotApp:
     @staticmethod
     def _extract_spotify_url(text: str) -> str | None:
         m = SPOTIFY_URL_RE.search(text)
-        return m.group(0) if m else None
+        if not m:
+            return None
+        return SpotifyTelegramBotApp._normalize_spotify_url(m.group(0))
 
     @staticmethod
-    def _extract_url_from_command(text: str) -> str | None:
+    def _normalize_kind(kind: str) -> str | None:
+        return SPOTIFY_KIND_ALIASES.get(kind.strip().lower())
+
+    @staticmethod
+    def _build_spotify_url_from_kind_id(kind: str, media_id: str) -> str | None:
+        normalized_kind = SpotifyTelegramBotApp._normalize_kind(kind)
+        normalized_id = media_id.strip()
+        if not normalized_kind or not SPOTIFY_ID_RE.fullmatch(normalized_id):
+            return None
+        return f"https://open.spotify.com/{normalized_kind}/{normalized_id}"
+
+    @staticmethod
+    def _extract_target_from_args(args: str, default_kind: str | None = None) -> str | None:
+        raw = args.strip()
+        if not raw:
+            return None
+
+        # 1) 标准 open.spotify URL
+        if url := SpotifyTelegramBotApp._extract_spotify_url(raw):
+            return url
+
+        # 2) spotify URI, e.g. spotify:track:<id>
+        if raw.startswith("spotify:"):
+            parts = raw.split(":")
+            if len(parts) >= 3:
+                built = SpotifyTelegramBotApp._build_spotify_url_from_kind_id(
+                    parts[1],
+                    parts[2],
+                )
+                if built:
+                    return built
+
+        tokens = raw.split()
+        # 3) /cmd <type> <id>
+        if len(tokens) >= 2:
+            built = SpotifyTelegramBotApp._build_spotify_url_from_kind_id(
+                tokens[0],
+                tokens[1],
+            )
+            if built:
+                return built
+
+        # 4) /cmd <id> (default kind)
+        if (
+            len(tokens) == 1
+            and default_kind
+            and SPOTIFY_ID_RE.fullmatch(tokens[0].strip())
+        ):
+            return SpotifyTelegramBotApp._build_spotify_url_from_kind_id(
+                default_kind,
+                tokens[0],
+            )
+        return None
+
+    @staticmethod
+    def _extract_url_from_command(text: str, default_kind: str | None = None) -> str | None:
         _, args = SpotifyTelegramBotApp._parse_command(text)
-        return SpotifyTelegramBotApp._extract_spotify_url(args)
+        return SpotifyTelegramBotApp._extract_target_from_args(
+            args,
+            default_kind=default_kind,
+        )
 
     @staticmethod
     def _normalize_spotify_url(url: str) -> str:
         u = url.strip()
         parsed = urlparse(u)
         if parsed.scheme and parsed.netloc and parsed.path:
-            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            path = parsed.path
+            parts = [p for p in path.split("/") if p]
+            # 去掉 open.spotify.com/intl-xx/ 前缀，统一缓存键
+            if len(parts) >= 3 and parts[0].startswith("intl-"):
+                path = "/" + "/".join(parts[1:])
+            return f"{parsed.scheme}://{parsed.netloc}{path}"
         return u
+
+    async def _handle_info_command(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None,
+    ) -> None:
+        _, args = self._parse_command(text)
+        args = args.strip()
+        if not args:
+            await self.telegram.send_message(
+                chat_id,
+                (
+                    f"chat_id: {chat_id}\n"
+                    "用法：\n"
+                    "- /i\n"
+                    "- /i <spotify-url>\n"
+                    "- /i <type> <id>  (type: song|track|album|artist|playlist|episode|show)\n"
+                    "- /i <id>  (默认按 song 处理)"
+                ),
+                reply_to_message_id=reply_to,
+            )
+            return
+
+        target = self._extract_target_from_args(args, default_kind="song")
+        if not target:
+            await self.telegram.send_message(
+                chat_id,
+                "用法：/i <spotify-url> 或 /i <type> <id> 或 /i <id>",
+                reply_to_message_id=reply_to,
+            )
+            return
+        await self._enqueue_download(chat_id, target, reply_to)
+
+    async def _set_worker_limit(self, new_limit: int) -> tuple[int, int]:
+        target = max(WORKER_LIMIT_MIN, min(int(new_limit), WORKER_LIMIT_MAX))
+        async with self._sem_resize_lock:
+            old = int(self.config.max_parallel_jobs)
+            if old == target:
+                return old, target
+            self.config.max_parallel_jobs = target
+            delta = target - old
+            if delta > 0:
+                # 扩容时，先取消旧的“缩容占位”任务并释放其占位
+                for task in list(self._sem_shrink_tasks):
+                    task.cancel()
+                self._sem_shrink_tasks.clear()
+                for _ in range(delta):
+                    self.sem.release()
+            else:
+                hold_count = -delta
+
+                async def _hold_permits(count: int) -> None:
+                    acquired = 0
+                    try:
+                        for _ in range(count):
+                            await self.sem.acquire()
+                            acquired += 1
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        for _ in range(acquired):
+                            self.sem.release()
+                        raise
+
+                task = asyncio.create_task(_hold_permits(hold_count))
+                self._sem_shrink_tasks.add(task)
+                self._tasks.add(task)
+
+                def _cleanup(t: asyncio.Task[Any]) -> None:
+                    self._tasks.discard(t)
+                    self._sem_shrink_tasks.discard(t)
+
+                task.add_done_callback(_cleanup)
+            return old, target
+
+    def _format_settings_status(self) -> str:
+        return (
+            "当前设置\n"
+            f"- worker 并发: {self.config.max_parallel_jobs}\n"
+            f"- 搜索每页: {self.config.search_limit}\n"
+            f"- 发送节流(global/chat): "
+            f"{self.config.telegram_send_global_interval_sec:.2f}s / "
+            f"{self.config.telegram_send_chat_interval_sec:.2f}s"
+        )
+
+    async def _handle_settings(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None,
+    ) -> None:
+        _, args = self._parse_command(text)
+        raw = args.strip().lower()
+        if not raw:
+            await self.telegram.send_message(
+                chat_id,
+                self._format_settings_status(),
+                reply_to_message_id=reply_to,
+            )
+            return
+
+        m = re.fullmatch(r"worker\s*([1-4])", raw) or re.fullmatch(
+            r"worker([1-4])",
+            raw,
+        )
+        if m:
+            value = int(m.group(1))
+            old, new = await self._set_worker_limit(value)
+            await self.telegram.send_message(
+                chat_id,
+                (
+                    f"已更新 worker 并发：{old} -> {new}\n"
+                    "说明：降低并发时会在当前任务释放后逐步生效。"
+                ),
+                reply_to_message_id=reply_to,
+            )
+            return
+
+        await self.telegram.send_message(
+            chat_id,
+            "用法：/st 或 /st worker1..worker4",
+            reply_to_message_id=reply_to,
+        )
 
     @staticmethod
     def _format_search_panel_text(page: SearchPage) -> str:
@@ -1039,12 +1338,14 @@ async def _async_main() -> None:
     logger.info("temp root: %s", cfg.temp_root)
     logger.info("cache file: %s", cfg.cache_file)
     logger.info(
-        "workers=%s pending_limit=%s download_timeout=%ss retry=%s backoff=%ss",
+        "workers=%s pending_limit=%s download_timeout=%ss retry=%s backoff=%ss send_limit(global/chat)=%.2fs/%.2fs",
         cfg.max_parallel_jobs,
         cfg.max_pending_jobs,
         cfg.download_timeout_sec,
         cfg.download_retry_count,
         cfg.download_retry_backoff_sec,
+        cfg.telegram_send_global_interval_sec,
+        cfg.telegram_send_chat_interval_sec,
     )
 
     while True:
