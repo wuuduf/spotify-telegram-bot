@@ -1,17 +1,14 @@
-# Votify
+# spotify-telegram-bot
 
 [![PyPI version](https://img.shields.io/pypi/v/votify?color=blue)](https://pypi.org/project/votify/)
 [![Python versions](https://img.shields.io/pypi/pyversions/votify)](https://pypi.org/project/votify/)
-[![License](https://img.shields.io/github/license/glomatico/votify)](https://github.com/glomatico/votify/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/wuuduf/spotify-telegram-bot)](https://github.com/wuuduf/spotify-telegram-bot/blob/main/LICENSE)
 [![Downloads](https://img.shields.io/pypi/dm/votify)](https://pypi.org/project/votify/)
+[![Forked from](https://img.shields.io/badge/forked%20from-glomatico%2Fvotify-6f42c1)](https://github.com/glomatico/votify)
 
-A command-line app for downloading songs, podcasts and videos from Spotify.
+A Spotify Telegram bot project based on a fork of `glomatico/votify`, with search/download/upload workflow and stability fixes.
 
-
-source .venv/bin/activate
-
-
-**Join our Discord Server:** <https://discord.gg/aBjMEZ9tnq>
+> Upstream project: <https://github.com/glomatico/votify>
 
 ## ✨ Features
 
