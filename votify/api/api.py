@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import time
+from email.utils import parsedate_to_datetime
 from http.cookiejar import MozillaCookieJar
 
 import base62
@@ -38,6 +39,29 @@ from .proto.playplay_pb2 import PlayPlayLicenseRequest, PlayPlayLicenseResponse
 from .totp import Totp
 
 logger = logging.getLogger(__name__)
+WIDEVINE_MAX_RETRIES = 6
+
+
+def _parse_retry_after_seconds(value: str | None, attempt: int) -> float:
+    if value:
+        text = value.strip()
+        if text:
+            try:
+                sec = float(text)
+                if sec > 0:
+                    return min(sec, 60.0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                dt = parsedate_to_datetime(text)
+                now = time.time()
+                sec = dt.timestamp() - now
+                if sec > 0:
+                    return min(sec, 60.0)
+            except Exception:
+                pass
+    # Spotify 未返回 Retry-After 时，使用指数退避
+    return min(2.0 * (2 ** max(0, attempt - 1)), 45.0)
 
 
 class SpotifyApi:
@@ -713,34 +737,65 @@ class SpotifyApi:
         return track_credits
 
     async def get_widevine_license(self, challenge: bytes, media_type: str) -> bytes:
-        await self._refresh_authorization_if_needed()
+        last_response_status = 0
+        last_response_text = ""
+        for attempt in range(1, WIDEVINE_MAX_RETRIES + 1):
+            await self._refresh_authorization_if_needed()
 
-        response = await self.client.post(
-            WIDEVINE_LICENSE_API_URL.format(type=media_type),
-            content=challenge,
-        )
-        widevine_license = response.content
-
-        if response.status_code != 200 or not widevine_license:
-            response_text = response.text
-            if response.status_code == 403:
-                response_text = (
-                    f"{response_text} Spotify rejected this Widevine request. "
-                    "This usually means the current .wvd is not accepted for this "
-                    "stream, or the current account is not entitled to the selected "
-                    "quality."
-                ).strip()
-            raise VotifyRequestException(
-                name="Widevine license",
-                response_status_code=response.status_code,
-                response_text=response_text,
+            response = await self.client.post(
+                WIDEVINE_LICENSE_API_URL.format(type=media_type),
+                content=challenge,
             )
+            widevine_license = response.content
 
-        logger.debug(
-            f"Received Widevine license: {base64.b64encode(widevine_license).decode()}"
+            if response.status_code == 200 and widevine_license:
+                logger.debug(
+                    f"Received Widevine license: {base64.b64encode(widevine_license).decode()}"
+                )
+                return widevine_license
+
+            last_response_status = int(response.status_code)
+            last_response_text = response.text
+
+            # 429: 限流，按 Retry-After 或指数退避重试
+            if response.status_code == 429 and attempt < WIDEVINE_MAX_RETRIES:
+                delay = _parse_retry_after_seconds(
+                    response.headers.get("Retry-After"),
+                    attempt,
+                )
+                logger.warning(
+                    "Widevine license rate-limited (429), retrying in %.1fs (attempt %s/%s)",
+                    delay,
+                    attempt,
+                    WIDEVINE_MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            # 401: 授权可能过期，强制刷新后再试一次
+            if response.status_code == 401 and attempt < WIDEVINE_MAX_RETRIES:
+                try:
+                    await self._initialize_authorization()
+                except Exception:
+                    pass
+                await asyncio.sleep(min(1.5 * attempt, 6.0))
+                continue
+
+            break
+
+        response_text = last_response_text
+        if last_response_status == 403:
+            response_text = (
+                f"{response_text} Spotify rejected this Widevine request. "
+                "This usually means the current .wvd is not accepted for this "
+                "stream, or the current account is not entitled to the selected "
+                "quality."
+            ).strip()
+        raise VotifyRequestException(
+            name="Widevine license",
+            response_status_code=last_response_status,
+            response_text=response_text,
         )
-
-        return widevine_license
 
     async def get_audio_stream_urls(self, format_id: str, file_id: str) -> dict:
         await self._refresh_authorization_if_needed()
