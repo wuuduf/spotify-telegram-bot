@@ -116,12 +116,20 @@ cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.confi
 - 直接放在仓库根目录：
   - `./cookies.txt`
   - `./device.wvd`
+- 这两个名字在当前 `docker-compose.yml` 里是固定的（默认必须这样命名）。
 
 示例命令（把你自己的文件复制到根目录）：
 
 ```bash
 cp /你的路径/cookies.txt ./cookies.txt
 cp /你的路径/device.wvd ./device.wvd
+```
+
+如果你的原始文件名不是这两个，先重命名：
+
+```bash
+mv ./你的原文件名_cookies.txt ./cookies.txt
+mv ./你的原文件名.wvd ./device.wvd
 ```
 
 根目录应类似：
