@@ -1129,17 +1129,16 @@ class SpotifyTelegramBotApp:
     @staticmethod
     def _build_search_panel_markup(token: str, page: SearchPage) -> dict[str, Any]:
         keyboard: list[list[dict[str, str]]] = []
-
-        for idx, item in enumerate(page.items):
-            text = str(idx + 1)
-            keyboard.append(
-                [
-                    {
-                        "text": text,
-                        "callback_data": f"sp:pick:{token}:{idx}",
-                    }
-                ]
+        pick_buttons: list[dict[str, str]] = []
+        for idx, _item in enumerate(page.items):
+            pick_buttons.append(
+                {
+                    "text": str(idx + 1),
+                    "callback_data": f"sp:pick:{token}:{idx}",
+                }
             )
+        for i in range(0, len(pick_buttons), 4):
+            keyboard.append(pick_buttons[i : i + 4])
 
         nav_row: list[dict[str, str]] = []
         if page.has_prev:
@@ -1149,7 +1148,7 @@ class SpotifyTelegramBotApp:
         if nav_row:
             keyboard.append(nav_row)
 
-        keyboard.append([{"text": "❌ 关闭", "callback_data": f"sp:close:{token}"}])
+        keyboard.append([{"text": "❌ 取消", "callback_data": f"sp:close:{token}"}])
         return {"inline_keyboard": keyboard}
 
     def _cleanup_expired_search_panels(self) -> None:
