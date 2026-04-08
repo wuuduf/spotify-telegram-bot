@@ -124,6 +124,9 @@ class VotifyRunner:
             "votify",
             "--config-path",
             self.votify_config_path,
+            # Bot 场景下不需要 CLI 的下载间隔节流（默认 10s/首），否则会明显拉长单曲与专辑耗时
+            "--wait-interval",
+            "0",
             "--output",
             str(output_dir),
             "--temp",
