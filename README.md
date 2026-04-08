@@ -10,6 +10,90 @@ A Spotify Telegram bot project based on a fork of `glomatico/votify`, with searc
 
 > Upstream project: <https://github.com/glomatico/votify>
 
+## 🚀 Deploy from Git Clone (CLI + Telegram Bot)
+
+### 1) Clone repository
+
+```bash
+git clone https://github.com/wuuduf/spotify-telegram-bot.git
+cd spotify-telegram-bot
+```
+
+### 2) Create Python environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+pip install -e ".[librespot]"
+```
+
+> Windows PowerShell activation:
+> `.\.venv\Scripts\Activate.ps1`
+
+### 3) Install system tools
+
+At minimum, install `ffmpeg` (current AAC route uses it).
+
+- macOS (Homebrew):
+  ```bash
+  brew install ffmpeg
+  ```
+- Ubuntu/Debian:
+  ```bash
+  sudo apt update
+  sudo apt install -y ffmpeg
+  ```
+
+### 4) Prepare Spotify files
+
+- Put `cookies.txt` in project root (Netscape format)
+- Put your `.wvd` file in project root
+- Create a local CLI config file `config.ini` (example):
+
+```ini
+[votify]
+session_type = web
+cookies_path = ./cookies.txt
+wvd_path = ./device.wvd
+output = ./Spotify
+audio_quality = aac-medium
+audio_download_mode = ytdlp
+audio_remux_mode = ffmpeg
+```
+
+### 5) Smoke test CLI download
+
+```bash
+python -m votify --config-path ./config.ini "https://open.spotify.com/track/7BHSV0J9IWich0yeU2g3H0"
+```
+
+### 6) Deploy Telegram Bot
+
+Create bot config:
+
+```bash
+cp ./spotify_bot.config.example.toml ./spotify_bot.config.toml
+```
+
+Then edit `spotify_bot.config.toml`:
+
+- `[bot].token` (or env `TELEGRAM_BOT_TOKEN`)
+- `[votify].config_path = "./config.ini"`
+- Optional queue/retry settings in `[runtime]`
+
+Run bot:
+
+```bash
+python -m votify.spotify_telegram_bot.main --config ./spotify_bot.config.toml
+```
+
+### 7) Common production run tips
+
+- Keep process in `tmux`/`screen`, or run with `nohup`
+- Keep `max_parallel_jobs=1` first, then tune gradually
+- Set `download_retry_count` and `download_retry_backoff_sec` for network jitter
+
 ## ✨ Features
 
 - 🎵 **Songs** - Download songs.
