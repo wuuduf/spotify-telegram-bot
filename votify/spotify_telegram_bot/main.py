@@ -518,7 +518,8 @@ class SpotifyTelegramBotApp:
         force_refresh: bool = False,
     ) -> None:
         cache_key = self._normalize_spotify_url(url)
-        if force_refresh:
+        use_file_id_cache = self._is_file_id_cache_eligible_url(url)
+        if force_refresh or not use_file_id_cache:
             self.cache.delete(cache_key)
         else:
             cached_sent = await self._try_send_cached(chat_id, cache_key, reply_to)
@@ -576,6 +577,7 @@ class SpotifyTelegramBotApp:
                 url,
                 cache_key,
                 reply_to,
+                use_file_id_cache=use_file_id_cache,
                 status_message_id=status_message_id,
             )
         )
@@ -587,6 +589,7 @@ class SpotifyTelegramBotApp:
         url: str,
         cache_key: str,
         reply_to: int | None,
+        use_file_id_cache: bool = True,
         status_message_id: int | None = None,
     ) -> None:
         result: DownloadResult | None = None
@@ -786,7 +789,7 @@ class SpotifyTelegramBotApp:
                             pass
                 await asyncio.sleep(0.2)
 
-            if cache_entries:
+            if cache_entries and use_file_id_cache:
                 self.cache.put(cache_key, cache_entries)
             if failed_files and sent > 0:
                 await _set_status(
@@ -986,6 +989,21 @@ class SpotifyTelegramBotApp:
                 path = "/" + "/".join(parts[1:])
             return f"{parsed.scheme}://{parsed.netloc}{path}"
         return u
+
+    @staticmethod
+    def _is_file_id_cache_eligible_url(url: str) -> bool:
+        """
+        仅对“单媒体”链接启用 file_id 缓存，避免专辑/歌单等集合任务的
+        部分成功结果（例如只下载出 1 首）污染缓存并被后续请求重复复用。
+        """
+        parsed = urlparse(url.strip())
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 3 and parts[0].startswith("intl-"):
+            parts = parts[1:]
+        if len(parts) < 2:
+            return False
+        media_type = parts[0].lower()
+        return media_type in {"track", "episode"}
 
     async def _handle_info_command(
         self,
