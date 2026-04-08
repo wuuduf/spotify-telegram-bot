@@ -96,7 +96,14 @@ python -m votify.spotify_telegram_bot.main --config ./spotify_bot.config.toml
 
 ### 8) Deploy with Docker Compose
 
-1. Prepare files:
+1. Clone repository:
+
+```bash
+git clone https://github.com/wuuduf/spotify-telegram-bot.git
+cd spotify-telegram-bot
+```
+
+2. Prepare files:
 
 ```bash
 mkdir -p docker/config docker/data
@@ -104,7 +111,7 @@ cp docker/config/config.ini.example docker/config/config.ini
 cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.config.toml
 ```
 
-2. Put your secrets in repo root:
+3. Put your secrets in repo root:
 
 - 直接放在仓库根目录：
   - `./cookies.txt`
@@ -128,26 +135,26 @@ cp /你的路径/device.wvd ./device.wvd
     └── spotify_bot.config.toml
 ```
 
-3. Edit `docker-compose.yml`:
+4. Edit `docker-compose.yml`:
 
 - 把 `TELEGRAM_BOT_TOKEN` 改成你自己的 bot token
 - `cookies` / `.wvd` 路径已在 yml 里写死为：
   - `./cookies.txt -> /config/cookies.txt`
   - `./device.wvd -> /config/device.wvd`
 
-4. Start:
+5. Start:
 
 ```bash
 docker compose up -d --build
 ```
 
-5. Check logs:
+6. Check logs:
 
 ```bash
 docker compose logs -f bot
 ```
 
-6. Stop:
+7. Stop:
 
 ```bash
 docker compose down
