@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import logging
 import re
 import time
@@ -60,6 +61,15 @@ class SearchPanelState:
     total: int
     items: list[SearchItem]
     created_at: float
+
+
+@dataclass(slots=True)
+class AudioUploadMeta:
+    title: str | None = None
+    performer: str | None = None
+    duration_seconds: int | None = None
+    thumbnail_path: Path | None = None
+    thumbnail_is_temp: bool = False
 
 
 class SpotifyTelegramBotApp:
@@ -513,12 +523,21 @@ class SpotifyTelegramBotApp:
                 await self.telegram.send_chat_action(chat_id, "upload_document")
                 response: dict[str, Any] | None = None
                 method_used: str | None = None
+                audio_meta: AudioUploadMeta | None = None
                 try:
                     if suffix in AUDIO_EXTS:
+                        audio_meta = self._build_audio_upload_meta(
+                            media_path,
+                            result.temp_dir,
+                        )
                         response = await self.telegram.send_audio(
                             chat_id,
                             media_path,
                             reply_to_message_id=reply_to if sent == 0 else None,
+                            title=audio_meta.title,
+                            performer=audio_meta.performer,
+                            duration_seconds=audio_meta.duration_seconds,
+                            thumbnail_path=audio_meta.thumbnail_path,
                         )
                         method_used = "audio"
                     elif suffix in VIDEO_EXTS:
@@ -535,13 +554,29 @@ class SpotifyTelegramBotApp:
                             reply_to_message_id=reply_to if sent == 0 else None,
                         )
                         method_used = "document"
-                except TelegramApiError:
+                except TelegramApiError as exc:
+                    logger.warning(
+                        "Failed to upload as %s, fallback to document: %s (%s)",
+                        "audio" if suffix in AUDIO_EXTS else "video/document",
+                        media_path.name,
+                        exc,
+                    )
                     response = await self.telegram.send_document(
                         chat_id,
                         media_path,
                         reply_to_message_id=reply_to if sent == 0 else None,
                     )
                     method_used = "document"
+                finally:
+                    if (
+                        audio_meta
+                        and audio_meta.thumbnail_is_temp
+                        and audio_meta.thumbnail_path
+                    ):
+                        try:
+                            audio_meta.thumbnail_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
 
                 cache_entry = self._build_cache_entry(
                     method_used=method_used,
@@ -555,12 +590,6 @@ class SpotifyTelegramBotApp:
 
             if cache_entries:
                 self.cache.put(cache_key, cache_entries)
-
-            await self.telegram.send_message(
-                chat_id,
-                f"✅ 完成，已发送 {sent} 个文件。\n下载目录：{result.output_dir}",
-                reply_to_message_id=reply_to,
-            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -729,12 +758,22 @@ class SpotifyTelegramBotApp:
         sent = 0
         for idx, item in enumerate(items):
             try:
+                if (
+                    item.method == "document"
+                    and Path(item.file_name or "").suffix.lower() in AUDIO_EXTS
+                ):
+                    # 历史缓存可能把音频错误固化为 document，这里主动回源重传一次
+                    self.cache.delete(cache_key)
+                    return 0
                 if item.method == "audio":
                     await self.telegram.send_audio_by_file_id(
                         chat_id=chat_id,
                         file_id=item.file_id,
                         reply_to_message_id=reply_to if idx == 0 else None,
                         caption=item.file_name or None,
+                        title=item.title or None,
+                        performer=item.performer or None,
+                        duration_seconds=item.duration if item.duration > 0 else None,
                     )
                 elif item.method == "video":
                     await self.telegram.send_video_by_file_id(
@@ -773,6 +812,16 @@ class SpotifyTelegramBotApp:
             node = response.get("document") or {}
         file_id = str(node.get("file_id") or "").strip()
         file_unique_id = str(node.get("file_unique_id") or "").strip()
+        title = ""
+        performer = ""
+        duration = 0
+        if method_used == "audio":
+            title = str(node.get("title") or "").strip()
+            performer = str(node.get("performer") or "").strip()
+            try:
+                duration = int(node.get("duration") or 0)
+            except Exception:
+                duration = 0
         if not file_id:
             return None
         return CachedFile(
@@ -780,8 +829,185 @@ class SpotifyTelegramBotApp:
             file_id=file_id,
             file_unique_id=file_unique_id,
             file_name=file_name,
+            title=title,
+            performer=performer,
+            duration=duration,
             created_at=TelegramFileCacheStore.now_iso(),
         )
+
+    @staticmethod
+    def _build_audio_upload_meta(media_path: Path, temp_dir: Path) -> AudioUploadMeta:
+        meta = AudioUploadMeta()
+        try:
+            from mutagen import File as MutagenFile  # type: ignore[import-not-found]
+        except Exception:
+            return meta
+
+        audio_obj: Any | None = None
+        try:
+            audio_obj = MutagenFile(str(media_path))
+        except Exception:
+            audio_obj = None
+        if not audio_obj:
+            return meta
+
+        tags = getattr(audio_obj, "tags", None)
+        if tags:
+            meta.title = SpotifyTelegramBotApp._pick_tag_text(
+                tags,
+                ("title", "\xa9nam", "TIT2"),
+            )
+            meta.performer = SpotifyTelegramBotApp._pick_tag_text(
+                tags,
+                ("artist", "\xa9ART", "TPE1", "albumartist", "aART"),
+            )
+
+        info = getattr(audio_obj, "info", None)
+        try:
+            length = float(getattr(info, "length", 0) or 0)
+            if length > 0:
+                meta.duration_seconds = max(1, int(round(length)))
+        except Exception:
+            meta.duration_seconds = None
+
+        cover_bytes = SpotifyTelegramBotApp._extract_cover_bytes(audio_obj)
+        thumb_path = SpotifyTelegramBotApp._create_thumbnail_from_cover(
+            cover_bytes=cover_bytes,
+            fallback_image_path=SpotifyTelegramBotApp._find_sidecar_cover(media_path),
+            temp_dir=temp_dir,
+        )
+        if thumb_path:
+            meta.thumbnail_path = thumb_path
+            meta.thumbnail_is_temp = True
+        return meta
+
+    @staticmethod
+    def _pick_tag_text(tags: Any, keys: tuple[str, ...]) -> str | None:
+        for key in keys:
+            try:
+                value = tags.get(key)
+            except Exception:
+                value = None
+            text = SpotifyTelegramBotApp._tag_value_to_text(value)
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _tag_value_to_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "text"):
+            value = getattr(value, "text")
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                text = SpotifyTelegramBotApp._tag_value_to_text(item)
+                if text:
+                    return text
+            return None
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8", errors="ignore")
+            except Exception:
+                return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _extract_cover_bytes(audio_obj: Any) -> bytes | None:
+        tags = getattr(audio_obj, "tags", None)
+        if tags:
+            try:
+                covr = tags.get("covr")
+                if covr:
+                    first = covr[0]
+                    data = bytes(first)
+                    if data:
+                        return data
+            except Exception:
+                pass
+            try:
+                for key in tags.keys():
+                    if str(key).startswith("APIC"):
+                        frame = tags.get(key)
+                        data = getattr(frame, "data", None)
+                        if data:
+                            return bytes(data)
+            except Exception:
+                pass
+
+        pictures = getattr(audio_obj, "pictures", None)
+        if pictures:
+            try:
+                first_pic = pictures[0]
+                data = getattr(first_pic, "data", None)
+                if data:
+                    return bytes(data)
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _find_sidecar_cover(media_path: Path) -> Path | None:
+        candidates = [
+            media_path.with_suffix(".jpg"),
+            media_path.with_suffix(".jpeg"),
+            media_path.with_suffix(".png"),
+            media_path.with_suffix(".webp"),
+            media_path.parent / "cover.jpg",
+            media_path.parent / "cover.jpeg",
+            media_path.parent / "cover.png",
+            media_path.parent / "folder.jpg",
+            media_path.parent / "folder.jpeg",
+            media_path.parent / "folder.png",
+        ]
+        for path in candidates:
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    @staticmethod
+    def _create_thumbnail_from_cover(
+        cover_bytes: bytes | None,
+        fallback_image_path: Path | None,
+        temp_dir: Path,
+    ) -> Path | None:
+        try:
+            from PIL import Image
+        except Exception:
+            return None
+
+        image: Any | None = None
+        try:
+            if cover_bytes:
+                image = Image.open(io.BytesIO(cover_bytes))
+            elif fallback_image_path:
+                image = Image.open(fallback_image_path)
+            else:
+                return None
+            image = image.convert("RGB")
+            try:
+                resample = Image.Resampling.LANCZOS  # Pillow >= 9
+            except Exception:
+                resample = Image.LANCZOS
+            image.thumbnail((320, 320), resample=resample)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            thumb_path = temp_dir / f"tgthumb-{uuid.uuid4().hex}.jpg"
+            image.save(thumb_path, format="JPEG", quality=88, optimize=True)
+            if thumb_path.stat().st_size > 200 * 1024:
+                for q in (80, 72, 64, 56):
+                    image.save(thumb_path, format="JPEG", quality=q, optimize=True)
+                    if thumb_path.stat().st_size <= 200 * 1024:
+                        break
+            return thumb_path
+        except Exception:
+            return None
+        finally:
+            if image is not None:
+                try:
+                    image.close()
+                except Exception:
+                    pass
 
 
 def parse_args() -> argparse.Namespace:

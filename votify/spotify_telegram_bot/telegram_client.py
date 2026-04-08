@@ -123,19 +123,39 @@ class TelegramClient:
         audio_path: Path,
         reply_to_message_id: int | None = None,
         caption: str | None = None,
+        title: str | None = None,
+        performer: str | None = None,
+        duration_seconds: int | None = None,
+        thumbnail_path: Path | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": chat_id}
         if reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
         if caption:
             payload["caption"] = caption
+        if title:
+            payload["title"] = title
+        if performer:
+            payload["performer"] = performer
+        if duration_seconds and duration_seconds > 0:
+            payload["duration"] = int(duration_seconds)
 
-        with audio_path.open("rb") as fp:
+        audio_fp = audio_path.open("rb")
+        thumb_fp = None
+        try:
+            files: dict[str, Any] = {"audio": (audio_path.name, audio_fp)}
+            if thumbnail_path and thumbnail_path.exists():
+                thumb_fp = thumbnail_path.open("rb")
+                files["thumbnail"] = (thumbnail_path.name, thumb_fp, "image/jpeg")
             return await self._post_form(
                 "sendAudio",
                 data=payload,
-                files={"audio": (audio_path.name, fp)},
+                files=files,
             )
+        finally:
+            audio_fp.close()
+            if thumb_fp:
+                thumb_fp.close()
 
     async def send_audio_by_file_id(
         self,
@@ -143,6 +163,9 @@ class TelegramClient:
         file_id: str,
         reply_to_message_id: int | None = None,
         caption: str | None = None,
+        title: str | None = None,
+        performer: str | None = None,
+        duration_seconds: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -152,6 +175,12 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if caption:
             payload["caption"] = caption
+        if title:
+            payload["title"] = title
+        if performer:
+            payload["performer"] = performer
+        if duration_seconds and duration_seconds > 0:
+            payload["duration"] = int(duration_seconds)
         return await self._post_json("sendAudio", payload)
 
     async def send_document(

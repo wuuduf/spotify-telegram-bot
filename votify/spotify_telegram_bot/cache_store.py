@@ -14,6 +14,9 @@ class CachedFile:
     file_unique_id: str
     file_name: str
     created_at: str
+    title: str = ""
+    performer: str = ""
+    duration: int = 0
 
 
 class TelegramFileCacheStore:
@@ -43,6 +46,10 @@ class TelegramFileCacheStore:
                     if not isinstance(row, dict):
                         continue
                     try:
+                        try:
+                            duration = int(row.get("duration") or 0)
+                        except Exception:
+                            duration = 0
                         records.append(
                             CachedFile(
                                 method=str(row.get("method", "")).strip(),
@@ -50,6 +57,9 @@ class TelegramFileCacheStore:
                                 file_unique_id=str(row.get("file_unique_id", "")).strip(),
                                 file_name=str(row.get("file_name", "")).strip(),
                                 created_at=str(row.get("created_at", "")).strip(),
+                                title=str(row.get("title", "")).strip(),
+                                performer=str(row.get("performer", "")).strip(),
+                                duration=duration,
                             )
                         )
                     except Exception:
@@ -91,4 +101,3 @@ class TelegramFileCacheStore:
     @staticmethod
     def now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
-
