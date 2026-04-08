@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from time import monotonic
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 
 PRIMARY_MEDIA_EXTS = {
@@ -217,14 +218,32 @@ class VotifyRunner:
             key=lambda p: str(p).lower(),
         )
 
+        try:
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            log_text = ""
+        summary_matches = ERROR_SUMMARY_RE.findall(log_text)
+        finished_error_count = int(summary_matches[-1]) if summary_matches else 0
+
+        # 集合类下载（album/playlist/artist/show）若日志已明确存在错误，
+        # 不能因为“至少产出 1 首”就当成成功，否则会出现“只传第一首就完成”。
+        if media_files and finished_error_count > 0 and self._is_collection_url(url):
+            raise VotifyRunError(
+                job_id=job_id,
+                output_dir=output_dir,
+                temp_dir=temp_dir,
+                log_path=log_path,
+                return_code=return_code,
+                log_tail=(
+                    "".join(log_tail).strip()
+                    or f"Partial collection download: produced {len(media_files)} file(s), "
+                    f"but finished with {finished_error_count} error(s)."
+                ),
+            )
+
         if not media_files:
             # votify 在部分失败场景下进程仍可能返回 0，这里通过日志补充判定。
-            try:
-                log_text = log_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                log_text = ""
-            m = ERROR_SUMMARY_RE.search(log_text)
-            if m and int(m.group(1)) > 0:
+            if finished_error_count > 0:
                 raise VotifyRunError(
                     job_id=job_id,
                     output_dir=output_dir,
@@ -268,9 +287,21 @@ class VotifyRunner:
             "network is unreachable",
             "http error 429",
             "too many requests",
+            "finished with",
             "retrying",
         )
         return any(p in text for p in retry_patterns)
+
+    @staticmethod
+    def _is_collection_url(url: str) -> bool:
+        parsed = urlparse(url.strip())
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 3 and parts[0].startswith("intl-"):
+            parts = parts[1:]
+        if len(parts) < 2:
+            return False
+        media_type = parts[0].lower()
+        return media_type in {"album", "playlist", "artist", "show"}
 
     def cleanup(self, result: DownloadResult) -> None:
         job_root = result.output_dir.parent
