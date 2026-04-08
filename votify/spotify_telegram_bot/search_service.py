@@ -70,7 +70,9 @@ class SpotifySearchService:
     async def start(self) -> None:
         self.api = await SpotifyApi.create_from_netscape_cookies(
             self.cookies_path,
-            session_type=SessionType.WEB,
+            # 搜索链路默认走 desktop 授权，绕开 web 链路的 clienttoken 请求，
+            # 可显著降低 "clienttoken 400 Bad Request" 概率。
+            session_type=SessionType.DESKTOP,
         )
         proxy_url = (
             os.environ.get("HTTPS_PROXY")
