@@ -1,6 +1,9 @@
 import hashlib
 import hmac
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Collection
 
 import httpx
@@ -23,17 +26,46 @@ class Totp:
 
     @classmethod
     async def initialize(cls) -> "Totp":
-        async with httpx.AsyncClient() as client:
-            response = await client.get(TOTP_SECRETS_URL)
-        secrets = safe_json(response)
-        if response.status_code != 200 or not secrets:
-            raise VotifyRequestException(
-                name="TOTP secrets",
-                response_status_code=response.status_code,
-                response_text=response.text,
-            )
+        # Try local cache file first (useful when git.gay is unreachable)
+        local_cache = Path(__file__).parent.parent.parent / "totp_secrets.json"
+        secrets = None
 
-        logger.debug(f"Received TOTP secrets: {secrets}")
+        try:
+            import os
+            _proxy = (
+                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            )
+            async with httpx.AsyncClient(proxy=_proxy) as client:
+                response = await client.get(TOTP_SECRETS_URL, timeout=10)
+            secrets = safe_json(response)
+            if response.status_code != 200 or not secrets:
+                secrets = None
+            else:
+                logger.debug(f"Received TOTP secrets from network: {secrets}")
+                # Save to local cache for future offline use
+                try:
+                    local_cache.write_text(json.dumps(secrets))
+                    logger.debug(f"Cached TOTP secrets to {local_cache}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to fetch TOTP secrets from network: {e}")
+
+        if secrets is None:
+            if local_cache.exists():
+                logger.warning(f"Using cached TOTP secrets from {local_cache}")
+                secrets = json.loads(local_cache.read_text())
+            else:
+                raise VotifyRequestException(
+                    name="TOTP secrets",
+                    response_status_code=0,
+                    response_text=(
+                        f"Network request failed and no local cache found at {local_cache}. "
+                        f"Please manually download {TOTP_SECRETS_URL} and save it as totp_secrets.json "
+                        f"in the votify root directory."
+                    ),
+                )
 
         version = max(secrets.keys(), key=int)
 

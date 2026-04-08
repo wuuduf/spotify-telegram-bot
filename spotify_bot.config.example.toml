@@ -1,0 +1,32 @@
+[bot]
+# 推荐：通过环境变量 TELEGRAM_BOT_TOKEN 注入
+token = ""
+api_base = "https://api.telegram.org"
+poll_timeout_sec = 30
+request_timeout_sec = 180
+
+# 留空 = 不限制 chat_id
+# 例如：[123456789, -1001234567890]
+allowed_chat_ids = []
+
+[votify]
+config_path = "./config.ini"
+workdir = "."
+
+[spotify]
+# 留空则从 votify config.ini 读取 cookies_path
+cookies_path = ""
+search_limit = 8
+
+[runtime]
+python_bin = "./.venv/bin/python"
+download_root = "/tmp/spotify_telegram_bot_downloads"
+temp_root = "/tmp/spotify_telegram_bot_temp"
+cache_file = "./spotify-telegram-cache.json"
+keep_downloads = false
+max_parallel_jobs = 1
+max_pending_jobs = 50
+download_timeout_sec = 7200
+download_retry_count = 1
+download_retry_backoff_sec = 2.0
+drop_pending_updates_on_start = true

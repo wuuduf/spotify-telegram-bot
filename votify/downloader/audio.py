@@ -6,6 +6,7 @@ from Crypto.Cipher import AES
 from Crypto.Util import Counter
 from yt_dlp import YoutubeDL
 from yt_dlp.downloader.http import HttpFD
+from yt_dlp.utils import DownloadError
 
 from ..interface.types import SpotifyMedia
 from .base import SpotifyBaseDownloader
@@ -13,6 +14,7 @@ from .enums import AudioDownloadMode, AudioRemuxMode
 from .types import DownloadItem
 
 logger = logging.getLogger(__name__)
+YTDLP_RETRY_ATTEMPTS = 3
 
 
 class SpotifyAudioDownloader(SpotifyBaseDownloader):
@@ -35,11 +37,51 @@ class SpotifyAudioDownloader(SpotifyBaseDownloader):
         logger.debug(f"Downloading audio stream from '{stream_url}' to '{output_path}'")
 
         if self.download_mode == AudioDownloadMode.YTDLP:
-            await asyncio.to_thread(self._download_with_ytdlp, stream_url, output_path)
+            await self._download_with_ytdlp_retry(stream_url, output_path)
         elif self.download_mode == AudioDownloadMode.ARIA2C:
             await self._download_with_aria2c(stream_url, output_path)
         else:
             await self._download_with_curl(stream_url, output_path)
+
+    async def _download_with_ytdlp_retry(
+        self,
+        stream_url: str,
+        output_path: str,
+    ) -> None:
+        for attempt in range(1, YTDLP_RETRY_ATTEMPTS + 1):
+            try:
+                await asyncio.to_thread(
+                    self._download_with_ytdlp,
+                    stream_url,
+                    output_path,
+                )
+                return
+            except DownloadError as exc:
+                if attempt >= YTDLP_RETRY_ATTEMPTS or not self._is_retryable_download_error(exc):
+                    raise
+                sleep_sec = min(2 * attempt, 6)
+                logger.warning(
+                    "yt-dlp download failed (attempt %s/%s): %s; retrying in %ss",
+                    attempt,
+                    YTDLP_RETRY_ATTEMPTS,
+                    exc,
+                    sleep_sec,
+                )
+                await asyncio.sleep(sleep_sec)
+
+    @staticmethod
+    def _is_retryable_download_error(exc: DownloadError) -> bool:
+        text = str(exc).lower()
+        retryable_patterns = (
+            "unexpected_eof_while_reading",
+            "connection reset",
+            "timed out",
+            "temporary failure",
+            "network is unreachable",
+            "http error 429",
+            "too many requests",
+        )
+        return any(p in text for p in retryable_patterns)
 
     def _download_with_ytdlp(self, stream_url: str, output_path: str) -> None:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)

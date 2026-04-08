@@ -7,6 +7,10 @@
 
 A command-line app for downloading songs, podcasts and videos from Spotify.
 
+
+source .venv/bin/activate
+
+
 **Join our Discord Server:** <https://discord.gg/aBjMEZ9tnq>
 
 ## ✨ Features

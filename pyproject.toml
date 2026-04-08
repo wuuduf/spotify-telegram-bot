@@ -27,6 +27,7 @@ repository = "https://github.com/glomatico/votify"
 
 [project.scripts]
 votify = "votify.cli.cli:main"
+spotify-telegram-bot = "votify.spotify_telegram_bot.main:main"
 
 [project.optional-dependencies]
 librespot = [

@@ -119,12 +119,26 @@ class SpotifyApi:
         await self._initialize_user_profile()
 
     def _initialize_client(self) -> None:
+        import os
+        from httpx import AsyncHTTPTransport
+
+        # When an explicit transport is passed to AsyncClient, httpx ignores
+        # proxy env vars entirely. We must read them manually and wire them in.
+        proxy_url = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+        )
+        base_transport = AsyncHTTPTransport(proxy=proxy_url) if proxy_url else AsyncHTTPTransport()
+
         self._transport = RetryTransport(
             retry=Retry(
                 total=6,
                 backoff_factor=1,
                 status_forcelist=[429, 500, 502, 503, 504],
-            )
+            ),
+            transport=base_transport,
         )
         self.client = httpx.AsyncClient(
             transport=self._transport,
@@ -708,10 +722,18 @@ class SpotifyApi:
         widevine_license = response.content
 
         if response.status_code != 200 or not widevine_license:
+            response_text = response.text
+            if response.status_code == 403:
+                response_text = (
+                    f"{response_text} Spotify rejected this Widevine request. "
+                    "This usually means the current .wvd is not accepted for this "
+                    "stream, or the current account is not entitled to the selected "
+                    "quality."
+                ).strip()
             raise VotifyRequestException(
                 name="Widevine license",
                 response_status_code=response.status_code,
-                response_text=response.text,
+                response_text=response_text,
             )
 
         logger.debug(

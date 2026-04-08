@@ -172,28 +172,43 @@ class SpotifyAudioInterface(SpotifyBaseInterface):
         if not self.api.librespot:
             return None
 
-        def media_id_wrapper(
-            media_id: str,
-            media_type: str,
-        ):
-            class SpotifyUri:
-                def to_spotify_uri(self):
-                    return f"spotify:{media_type}:{media_id}"
-
-            return SpotifyUri()
-
-        if media_type == "track":
-            metadata = await asyncio.to_thread(
-                self.api.librespot.session.api().get_metadata_4_track,
-                media_id_wrapper(media_id, media_type),
+        if not self.api.premium_session:
+            logger.warning(
+                "Current account is not Premium; Spotify is rejecting librespot/Ogg "
+                "requests for this account. Trying the next configured audio quality "
+                "instead."
             )
-        elif media_type == "episode":
-            metadata = await asyncio.to_thread(
-                self.api.librespot.session.api().get_metadata_4_episode,
-                media_id_wrapper(media_id, media_type),
-            )
-        else:
             return None
+
+        spotify_uri = f"spotify:{media_type}:{media_id}"
+
+        try:
+            if media_type == "track":
+                from librespot.metadata import TrackId
+
+                metadata = await asyncio.to_thread(
+                    self.api.librespot.session.api().get_metadata_4_track,
+                    TrackId.from_uri(spotify_uri),
+                )
+            elif media_type == "episode":
+                from librespot.metadata import EpisodeId
+
+                metadata = await asyncio.to_thread(
+                    self.api.librespot.session.api().get_metadata_4_episode,
+                    EpisodeId.from_uri(spotify_uri),
+                )
+            else:
+                return None
+        except Exception as exc:
+            from librespot.mercury import MercuryClient
+
+            if isinstance(exc, MercuryClient.MercuryException) and exc.code == 403:
+                logger.warning(
+                    "Librespot metadata request returned 403. Trying the next "
+                    "configured audio quality instead."
+                )
+                return None
+            raise
 
         audio_quality_int = int(audio_quality.format_id)
         file_id = next(
