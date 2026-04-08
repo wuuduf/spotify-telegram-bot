@@ -83,9 +83,10 @@ class BotConfig:
                 except (TypeError, ValueError):
                     continue
 
-        download_root = str(
+        download_root_raw = str(
             runtime_section.get("download_root", DEFAULT_DOWNLOAD_ROOT)
-        ).strip() or DEFAULT_DOWNLOAD_ROOT
+        ).strip()
+        download_root = _resolve_download_root(download_root_raw)
         temp_root_raw = str(runtime_section.get("temp_root", "")).strip()
         temp_root = _resolve_temp_root(
             download_root=download_root,
@@ -167,6 +168,17 @@ def _resolve_temp_root(download_root: str, temp_root_raw: str) -> str:
     if not temp_root_raw or _is_system_tmp_path(temp_root_raw):
         return str(Path(download_root) / DEFAULT_TEMP_SUBDIR)
     return temp_root_raw
+
+
+def _resolve_download_root(download_root_raw: str) -> str:
+    """
+    兼容旧默认值：若仍是历史 /tmp 路径，则迁移到项目目录下。
+    """
+    if not download_root_raw:
+        return DEFAULT_DOWNLOAD_ROOT
+    if download_root_raw == "/tmp/spotify_telegram_bot_downloads":
+        return DEFAULT_DOWNLOAD_ROOT
+    return download_root_raw
 
 
 def _is_system_tmp_path(path_str: str) -> bool:
