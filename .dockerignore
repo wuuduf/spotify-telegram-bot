@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.log
+
+# local secrets / runtime data
+cookies.txt
+*.wvd
+config.ini
+spotify_bot.config.toml
+spotify-telegram-cache.json
+docker/data

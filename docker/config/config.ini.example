@@ -1,0 +1,12 @@
+[votify]
+session_type = web
+cookies_path = /config/cookies.txt
+wvd_path = /config/device.wvd
+output = /data/Spotify
+temp = /data/tmp
+audio_quality = aac-medium
+audio_download_mode = ytdlp
+audio_remux_mode = ffmpeg
+video_format = mp4
+video_resolution = 1080p
+video_remux_mode = ffmpeg

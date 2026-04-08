@@ -1,0 +1,26 @@
+name: spotify-telegram-bot
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wuuduf/spotify-telegram-bot:latest
+    container_name: spotify-telegram-bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./docker/config:/config
+      - ./docker/data:/data
+    command:
+      [
+        "python",
+        "-m",
+        "votify.spotify_telegram_bot.main",
+        "--config",
+        "/config/spotify_bot.config.toml",
+        "--log-level",
+        "INFO"
+      ]

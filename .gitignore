@@ -7,3 +7,8 @@ __pycache__
 !README.md
 !requirements.txt
 !uv.lock
+!Dockerfile
+!docker-compose.yml
+!.dockerignore
+!docker
+!docker/**

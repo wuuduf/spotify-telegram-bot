@@ -94,6 +94,47 @@ python -m votify.spotify_telegram_bot.main --config ./spotify_bot.config.toml
 - Keep `max_parallel_jobs=1` first, then tune gradually
 - Set `download_retry_count` and `download_retry_backoff_sec` for network jitter
 
+### 8) Deploy with Docker Compose
+
+1. Prepare files:
+
+```bash
+mkdir -p docker/config docker/data
+cp docker/.env.example .env
+cp docker/config/config.ini.example docker/config/config.ini
+cp docker/config/spotify_bot.config.toml.example docker/config/spotify_bot.config.toml
+```
+
+2. Put your secrets into `docker/config/`:
+
+- `cookies.txt`
+- `device.wvd` (or your own `.wvd` filename, then update `docker/config/config.ini`)
+
+3. Edit `.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456789:replace_me
+TZ=Asia/Shanghai
+```
+
+4. Start:
+
+```bash
+docker compose up -d --build
+```
+
+5. Check logs:
+
+```bash
+docker compose logs -f bot
+```
+
+6. Stop:
+
+```bash
+docker compose down
+```
+
 ## ✨ Features
 
 - 🎵 **Songs** - Download songs.
