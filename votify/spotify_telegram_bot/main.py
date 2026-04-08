@@ -609,9 +609,14 @@ class SpotifyTelegramBotApp:
 
             sent = 0
             cache_entries: list[CachedFile] = []
+            failed_files: list[str] = []
             for media_path in result.media_files:
                 suffix = media_path.suffix.lower()
-                await self.telegram.send_chat_action(chat_id, "upload_document")
+                try:
+                    await self.telegram.send_chat_action(chat_id, "upload_document")
+                except Exception as exc:
+                    # chat_action 失败不应中断整批媒体发送（常见于瞬时限流）
+                    logger.debug("send_chat_action ignored: %s", exc)
                 response: dict[str, Any] | None = None
                 method_used: str | None = None
                 audio_meta: AudioUploadMeta | None = None
@@ -645,6 +650,14 @@ class SpotifyTelegramBotApp:
                             reply_to_message_id=reply_to if sent == 0 else None,
                         )
                         method_used = "document"
+                    cache_entry = self._build_cache_entry(
+                        method_used=method_used,
+                        response=response,
+                        file_name=media_path.name,
+                    )
+                    if cache_entry:
+                        cache_entries.append(cache_entry)
+                    sent += 1
                 except TelegramApiError as exc:
                     logger.warning(
                         "Failed to upload as %s, fallback to document: %s (%s)",
@@ -652,12 +665,31 @@ class SpotifyTelegramBotApp:
                         media_path.name,
                         exc,
                     )
-                    response = await self.telegram.send_document(
-                        chat_id,
-                        media_path,
-                        reply_to_message_id=reply_to if sent == 0 else None,
-                    )
-                    method_used = "document"
+                    try:
+                        response = await self.telegram.send_document(
+                            chat_id,
+                            media_path,
+                            reply_to_message_id=reply_to if sent == 0 else None,
+                        )
+                        method_used = "document"
+                        cache_entry = self._build_cache_entry(
+                            method_used=method_used,
+                            response=response,
+                            file_name=media_path.name,
+                        )
+                        if cache_entry:
+                            cache_entries.append(cache_entry)
+                        sent += 1
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "Failed to upload media after fallback: %s (%s)",
+                            media_path.name,
+                            fallback_exc,
+                        )
+                        failed_files.append(f"{media_path.name}: {fallback_exc}")
+                except Exception as exc:
+                    logger.warning("Failed to upload media: %s (%s)", media_path.name, exc)
+                    failed_files.append(f"{media_path.name}: {exc}")
                 finally:
                     if (
                         audio_meta
@@ -668,19 +700,25 @@ class SpotifyTelegramBotApp:
                             audio_meta.thumbnail_path.unlink(missing_ok=True)
                         except Exception:
                             pass
-
-                cache_entry = self._build_cache_entry(
-                    method_used=method_used,
-                    response=response,
-                    file_name=media_path.name,
-                )
-                if cache_entry:
-                    cache_entries.append(cache_entry)
-                sent += 1
                 await asyncio.sleep(0.2)
 
             if cache_entries:
                 self.cache.put(cache_key, cache_entries)
+            if failed_files and sent > 0:
+                preview = "\n".join(f"- {x}" for x in failed_files[:5])
+                more = ""
+                if len(failed_files) > 5:
+                    more = f"\n... 其余 {len(failed_files) - 5} 个失败项已省略"
+                await self.telegram.send_message(
+                    chat_id,
+                    f"⚠️ 部分文件发送失败（成功 {sent}，失败 {len(failed_files)}）:\n{preview}{more}",
+                    reply_to_message_id=reply_to,
+                )
+            if sent == 0 and failed_files:
+                raise RuntimeError(
+                    "all media upload failed: "
+                    + "; ".join(failed_files[:3])
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

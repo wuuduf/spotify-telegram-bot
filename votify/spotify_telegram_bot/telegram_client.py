@@ -143,6 +143,19 @@ class TelegramClient:
     ) -> dict[str, Any]:
         last_error: TelegramApiError | None = None
         for attempt in range(1, self.max_retry_attempts + 1):
+            # 发生重试时，上传文件句柄需要回到开头，否则会发送空内容
+            for file_item in files.values():
+                fp: Any | None = None
+                if isinstance(file_item, tuple) and len(file_item) >= 2:
+                    fp = file_item[1]
+                elif hasattr(file_item, "read"):
+                    fp = file_item
+                if fp is not None and hasattr(fp, "seek"):
+                    try:
+                        fp.seek(0)
+                    except Exception:
+                        pass
+
             try:
                 resp = await self.client.post(self._url(method), data=data, files=files)
             except httpx.HTTPError as exc:
