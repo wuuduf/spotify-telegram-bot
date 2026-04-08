@@ -112,8 +112,9 @@ class SpotifyTelegramBotApp:
             download_retry_backoff_sec=config.download_retry_backoff_sec,
         )
         logger.info(
-            "votify runner: audio_download_mode=%s wait_interval=2s",
+            "votify runner: audio_download_mode=%s wait_interval=%.1fs",
             self.runner.audio_download_mode,
+            self.runner.wait_interval_sec,
         )
         self.search = SpotifySearchService(config.spotify_cookies_path)
         self.cache = TelegramFileCacheStore(config.cache_file)

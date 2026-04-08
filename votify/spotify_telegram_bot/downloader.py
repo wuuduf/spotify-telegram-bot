@@ -71,6 +71,7 @@ class VotifyRunner:
         self.download_retry_count = max(0, int(download_retry_count))
         self.download_retry_backoff_sec = max(0.0, float(download_retry_backoff_sec))
         self.audio_download_mode = self._select_fast_audio_download_mode()
+        self.wait_interval_sec = 0.5
 
     @staticmethod
     def _select_fast_audio_download_mode() -> str:
@@ -141,9 +142,9 @@ class VotifyRunner:
             # 采用当前环境里可用的更快下载器（aria2c > curl > ytdlp）
             "--audio-download-mode",
             self.audio_download_mode,
-            # 控制每首之间停顿为 2 秒（兼顾稳定性与速度）
+            # 控制每首之间停顿为 0.5 秒（进一步提速）
             "--wait-interval",
-            "2",
+            str(self.wait_interval_sec),
             "--output",
             str(output_dir),
             "--temp",
