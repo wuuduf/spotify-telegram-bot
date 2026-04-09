@@ -823,6 +823,14 @@ class SpotifyTelegramBotApp:
             raise
         except Exception as exc:
             err = str(exc)
+            err_lower = err.lower()
+            if "widevine license request failed with status code 429" in err_lower:
+                err = (
+                    f"{err}\n"
+                    "提示：当前出口 IP 被 Spotify Widevine 限流。"
+                    "请等待几分钟后重试，或更换代理出口；"
+                    "若要规避 Widevine 路径，可改用 librespot+vorbis。"
+                )
             if len(err) > 2000:
                 err = err[:2000] + "...(truncated)"
             await _set_status(f"❌ 下载失败：{err}", force=True)

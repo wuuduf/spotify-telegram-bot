@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import uuid
@@ -22,6 +23,9 @@ PRIMARY_MEDIA_EXTS = {
 }
 ERROR_SUMMARY_RE = re.compile(r"Finished with (\d+) error\(s\)", re.IGNORECASE)
 SKIPPING_RE = re.compile(r"Skipping .*?:\s*(.+)", re.IGNORECASE)
+WIDEVINE_429_COOLDOWN_SEC = 300.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -111,6 +115,14 @@ class VotifyRunner:
                     )
                 )
                 backoff = self.download_retry_backoff_sec * attempt
+                if self._is_widevine_429_error(exc):
+                    backoff = max(backoff, WIDEVINE_429_COOLDOWN_SEC)
+                    logger.warning(
+                        "Detected Widevine 429, cooling down %.0fs before retry (%s/%s)",
+                        backoff,
+                        attempt,
+                        max_attempts,
+                    )
                 if backoff > 0:
                     await asyncio.sleep(backoff)
 
@@ -286,12 +298,21 @@ class VotifyRunner:
             "timed out",
             "timeout",
             "network is unreachable",
+            "status code 429",
             "http error 429",
             "too many requests",
             "finished with",
             "retrying",
         )
         return any(p in text for p in retry_patterns)
+
+    @staticmethod
+    def _is_widevine_429_error(exc: VotifyRunError) -> bool:
+        text = (exc.log_tail or "").lower()
+        return (
+            "widevine license request failed with status code 429" in text
+            or "widevine license" in text and "429" in text
+        )
 
     @staticmethod
     def _is_collection_url(url: str) -> bool:
